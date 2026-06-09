@@ -199,6 +199,7 @@ let fileOffset = 0;
 const fileLimit = 50;
 let currentServerID = '';
 let serversCache = [];
+let currentFiles = [];   // 当前页文件列表，按钮按下标引用，避免路径反斜杠转义问题
 
 // ── Tab 切换 ──────────────────────────────────────
 function showTab(name, btn) {
@@ -333,25 +334,34 @@ async function searchFiles(offset) {
     return;
   }
 
+  currentFiles = data;
+
   wrap.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <button class="btn sm" onclick="zipSelected()">⬇ 打包下载选中</button>
+      <span id="sel-count" style="font-size:12px;color:#6b7280">未选择</span>
+    </div>
     <table>
       <thead>
         <tr>
-          <th style="width:40%">名称 / 路径</th>
-          <th style="width:12%">类型</th>
-          <th style="width:12%">大小</th>
-          <th style="width:12%">业务号</th>
-          <th style="width:12%">后缀</th>
-          <th style="width:12%">更新时间</th>
+          <th style="width:34px"><input type="checkbox" onclick="toggleAll(this)" title="全选"></th>
+          <th style="width:32%">名称 / 路径</th>
+          <th style="width:8%">类型</th>
+          <th style="width:9%">大小</th>
+          <th style="width:11%">业务号</th>
+          <th style="width:7%">后缀</th>
+          <th style="width:13%">更新时间</th>
+          <th style="width:20%">操作</th>
         </tr>
       </thead>
       <tbody>
-        ${data.map(f => {
+        ${data.map((f, i) => {
           const isDir = f.is_dir;
           const icon  = isDir ? '📁' : fileIcon(f.ext);
           const name  = lastName(f.path);
           const short = f.path.length > 60 ? '…' + f.path.slice(-58) : f.path;
           return `<tr>
+            <td>${isDir ? '' : `<input type="checkbox" class="file-chk" data-idx="${i}" onchange="updateSelCount()">`}</td>
             <td class="name" title="${f.path}">
               <span class="icon">${icon}</span>
               <span class="path-text">
@@ -364,10 +374,12 @@ async function searchFiles(offset) {
             <td>${f.biz_key ? `<span class="tag">${f.biz_key}</span>` : '—'}</td>
             <td>${f.ext || '—'}</td>
             <td>${f.updated_at ? f.updated_at.slice(0,16).replace('T',' ') : '—'}</td>
+            <td>${rowActions(f, i)}</td>
           </tr>`;
         }).join('')}
       </tbody>
     </table>`;
+  updateSelCount();
 
   // 分页
   const pg = document.getElementById('pg-bar');
@@ -376,6 +388,95 @@ async function searchFiles(offset) {
     `第 ${offset + 1}–${offset + data.length} 条`;
   document.getElementById('pg-prev').disabled = offset === 0;
   document.getElementById('pg-next').disabled = data.length < fileLimit;
+}
+
+// ── 文件操作（下载 / 预览 / 水印 / 打包） ─────────────
+const PREVIEWABLE = ['.pdf','.doc','.docx','.xls','.xlsx','.ppt','.pptx',
+  '.txt','.md','.csv','.jpg','.jpeg','.png','.gif','.bmp','.tif','.tiff'];
+
+function isPreviewable(ext) {
+  return ext ? PREVIEWABLE.includes(ext.toLowerCase()) : false;
+}
+
+// rowActions 渲染单行的操作按钮。按下标引用 currentFiles，避免把含反斜杠的
+// Windows 路径塞进 onclick 字符串导致转义错乱。
+function rowActions(f, i) {
+  if (f.is_dir) {
+    return '<span style="color:#cbd5e1">—</span>';
+  }
+  const ext = (f.ext || '').toLowerCase();
+  let btns = `<button class="btn sm" onclick="dlFile(${i})">下载</button>`;
+  if (isPreviewable(ext)) {
+    btns += ` <button class="btn sm grey" onclick="previewFile(${i})">预览</button>`;
+  }
+  if (ext === '.pdf') {
+    btns += ` <button class="btn sm grey" onclick="watermarkFile(${i})">水印</button>`;
+  }
+  return `<div style="display:flex;gap:5px;flex-wrap:wrap">${btns}</div>`;
+}
+
+function dlFile(i) {
+  const f = currentFiles[i];
+  window.location = '/api/files/dl?server_id=' + encodeURIComponent(currentServerID) +
+    '&path=' + encodeURIComponent(f.path);
+}
+
+function previewFile(i) {
+  const f = currentFiles[i];
+  window.open('/api/files/preview?server_id=' + encodeURIComponent(currentServerID) +
+    '&path=' + encodeURIComponent(f.path), '_blank');
+}
+
+function watermarkFile(i) {
+  const f = currentFiles[i];
+  const text = prompt('水印文字', 'CONFIDENTIAL');
+  if (text === null) return;
+  postDownload('/api/files/watermark',
+    { server_id: currentServerID, path: f.path, text: text, opacity: 0.3 },
+    'watermarked.pdf');
+}
+
+function zipSelected() {
+  const chks = [...document.querySelectorAll('.file-chk:checked')];
+  if (!chks.length) { alert('请先勾选要打包的文件'); return; }
+  const paths = chks.map(c => currentFiles[+c.dataset.idx].path);
+  postDownload('/api/files/zip',
+    { server_id: currentServerID, paths: paths }, 'diskmon-pack.zip');
+}
+
+function toggleAll(box) {
+  document.querySelectorAll('.file-chk').forEach(c => { c.checked = box.checked; });
+  updateSelCount();
+}
+
+function updateSelCount() {
+  const n = document.querySelectorAll('.file-chk:checked').length;
+  const el = document.getElementById('sel-count');
+  if (el) el.textContent = n ? `已选 ${n} 个文件` : '未选择';
+}
+
+// postDownload 发起 POST 并把返回的二进制流当作文件下载。
+async function postDownload(path, body, filename) {
+  let r;
+  try {
+    r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    alert('请求失败: ' + e.message); return;
+  }
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    alert('操作失败 (' + r.status + '): ' + txt); return;
+  }
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // ── 工具函数 ──────────────────────────────────────
