@@ -141,8 +141,13 @@ func (m *Monitor) Run(ctx context.Context) error {
 			pendingOld, pendingNew)
 		if err != nil {
 			if IsJournalEntryDeleted(err) {
-				m.logger.Warn("journal entries deleted, resetting to FirstUSN")
-				cp.NextUSN = journal.FirstUSN
+				// Journal wrapped; the records since our checkpoint are gone.
+				// Skip the gap and stay live rather than replaying all history.
+				// Changes in the lost window are missed — a full rescan is needed
+				// to reconcile if this happens.
+				m.logger.Warn("journal entries deleted (wrapped), skipping to current position — run a full rescan to reconcile",
+					"lost_from", cp.NextUSN, "resume_at", journal.NextUSN)
+				cp.NextUSN = journal.NextUSN
 				m.sleep(ctx)
 				continue
 			}
