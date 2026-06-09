@@ -1,0 +1,100 @@
+name: USN smoke test
+
+# Verifies the NTFS USN Journal monitoring pipeline end-to-end on a real
+# Windows runner: build the client, watch a directory in --dry-run mode,
+# perform file operations, and assert the expected "file event" log lines
+# appear. No database is involved (dry-run logs events only).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  usn-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build client
+        run: go build -o diskmon-client.exe ./cmd/client/
+
+      - name: Run USN smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $testDir = 'C:\diskmon-test'
+          New-Item -ItemType Directory -Force -Path $testDir        | Out-Null
+          New-Item -ItemType Directory -Force -Path 'C:\diskmon-ci\logs' | Out-Null
+
+          Write-Host '--- starting client in dry-run mode ---'
+          $proc = Start-Process -FilePath '.\diskmon-client.exe' `
+            -ArgumentList '--config', '.github/ci/client-dryrun.yaml', '--dry-run' `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput 'client.out.log' `
+            -RedirectStandardError  'client.err.log'
+
+          function Wait-ForLine($pattern, $timeoutSec) {
+            $deadline = (Get-Date).AddSeconds($timeoutSec)
+            while ((Get-Date) -lt $deadline) {
+              if ((Test-Path 'client.out.log') -and
+                  (Select-String -Path 'client.out.log' -Pattern $pattern -Quiet)) {
+                return $true
+              }
+              if ($proc.HasExited) { return $false }
+              Start-Sleep -Milliseconds 300
+            }
+            return $false
+          }
+
+          # Wait until the monitor has fixed its baseline USN. Only files created
+          # AFTER this point are guaranteed to be observed.
+          if (-not (Wait-ForLine 'starting from current journal position' 60)) {
+            Write-Host '===== stdout ====='; Get-Content 'client.out.log' -ErrorAction SilentlyContinue
+            Write-Host '===== stderr ====='; Get-Content 'client.err.log' -ErrorAction SilentlyContinue
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+            throw 'monitor never reached "starting from current journal position" (USN journal access may have failed)'
+          }
+          Start-Sleep -Seconds 1   # small margin past the baseline
+
+          Write-Host '--- performing file operations ---'
+          Set-Content -Path "$testDir\hello.txt" -Value 'hello from CI'      # create
+          Start-Sleep -Seconds 2
+          Add-Content -Path "$testDir\hello.txt" -Value 'more data'          # write
+          Start-Sleep -Seconds 2
+          Rename-Item  -Path "$testDir\hello.txt" -NewName 'renamed.txt'     # rename
+          Start-Sleep -Seconds 2
+          Remove-Item  -Path "$testDir\renamed.txt"                          # remove
+          Start-Sleep -Seconds 2
+
+          $createOk = Wait-ForLine 'file event.*type=create.*hello\.txt' 20
+          $renameOk = Wait-ForLine 'file event.*type=rename.*renamed\.txt' 20
+          $removeOk = Wait-ForLine 'file event.*type=remove.*renamed\.txt' 20
+
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+
+          Write-Host '===== client stdout ====='
+          Get-Content 'client.out.log' -ErrorAction SilentlyContinue
+          Write-Host '===== client stderr ====='
+          Get-Content 'client.err.log' -ErrorAction SilentlyContinue
+
+          Write-Host ''
+          Write-Host "create event detected : $createOk"
+          Write-Host "rename event detected : $renameOk"
+          Write-Host "remove event detected : $removeOk"
+
+          # The create event is the core assertion; rename/remove are reported
+          # but do not fail the build (interactive editors split these into
+          # several USN records whose exact shape varies).
+          if (-not $createOk) {
+            throw 'FAIL: no "file event type=create ... hello.txt" was logged'
+          }
+          Write-Host 'PASS: USN create event observed end-to-end'

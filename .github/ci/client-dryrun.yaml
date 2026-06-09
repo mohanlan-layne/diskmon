@@ -1,0 +1,26 @@
+# CI dry-run config — used by .github/workflows/usn-smoke-test.yml only.
+# In --dry-run mode the database is never contacted; the DSN below is a
+# placeholder solely to satisfy config validation.
+postgres:
+  dsn: "dry-run-unused"
+
+server_id: "ci-smoke"
+name: "CI smoke test"
+
+# Watch a throwaway directory on the runner's C: volume.
+volumes:
+  - name: "C:"
+    journal_size: 33554432   # 32 MB
+
+filters:
+  include_dirs:
+    - 'C:\diskmon-test'
+  exclude_dirs: []
+  extensions: []   # empty = match all extensions
+  events: []
+
+poll_interval_ms: 500
+rename_window_ms: 500
+
+checkpoint_path: 'C:\diskmon-ci\checkpoints'
+log_path:        'C:\diskmon-ci\logs\client.log'

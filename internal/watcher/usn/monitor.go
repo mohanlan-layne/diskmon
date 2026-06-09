@@ -39,6 +39,7 @@ type Monitor struct {
 	pollDelay  time.Duration
 	renameWin  time.Duration
 	cacheSize  int
+	dryRun     bool
 	logger     *slog.Logger
 }
 
@@ -53,6 +54,7 @@ type MonitorConfig struct {
 	PollIntervalMs int
 	RenameWindowMs int
 	CacheSize      int
+	DryRun         bool
 	Logger         *slog.Logger
 }
 
@@ -72,6 +74,7 @@ func NewMonitor(cfg MonitorConfig) *Monitor {
 		pollDelay: time.Duration(cfg.PollIntervalMs) * time.Millisecond,
 		renameWin: time.Duration(cfg.RenameWindowMs) * time.Millisecond,
 		cacheSize: cfg.CacheSize,
+		dryRun:    cfg.DryRun,
 		logger:    logger.With("volume", cfg.Volume.Name),
 	}
 }
@@ -416,16 +419,24 @@ func (m *Monitor) applyEvents(ctx context.Context, events []model.ChangeEvent) e
 			UpdatedAt: evt.OccurredAt,
 		}
 
+		switch evt.EventType {
+		case "rename":
+			m.logger.Info("file event", "type", "rename", "old", evt.OldPath, "new", evt.Path)
+		default:
+			m.logger.Info("file event", "type", evt.EventType, "path", evt.Path)
+		}
+
+		if m.dryRun {
+			continue // log only, no database writes
+		}
+
 		var err error
 		switch evt.EventType {
 		case "create", "write":
-			m.logger.Info("file event", "type", evt.EventType, "path", evt.Path)
 			err = m.catalog.Upsert(ctx, entry)
 		case "remove":
-			m.logger.Info("file event", "type", evt.EventType, "path", evt.Path)
 			err = m.catalog.Delete(ctx, m.serverID, evt.Path)
 		case "rename":
-			m.logger.Info("file event", "type", "rename", "old", evt.OldPath, "new", evt.Path)
 			err = m.catalog.Rename(ctx, m.serverID, evt.OldPath, entry)
 		}
 		if err != nil {

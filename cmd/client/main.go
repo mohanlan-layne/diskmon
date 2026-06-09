@@ -42,6 +42,7 @@ func main() {
 	rescan := flag.Bool("rescan", false, "force a full rescan before monitoring")
 	runSvc := flag.Bool("service", false, "run as Windows Service")
 	printInfo := flag.Bool("print-info", false, "print server registration info and exit")
+	dryRun := flag.Bool("dry-run", false, "log file events without connecting to the database (for testing)")
 	flag.Parse()
 
 	cfg, err := config.LoadClient(*cfgPath)
@@ -59,10 +60,10 @@ func main() {
 	printRegistrationInfo(cfg) // always print on startup so it shows in logs
 
 	if *runSvc {
-		runAsService(cfg, *rescan, logger)
+		runAsService(cfg, *rescan, *dryRun, logger)
 		return
 	}
-	if err := run(context.Background(), cfg, *rescan, logger); err != nil {
+	if err := run(context.Background(), cfg, *rescan, *dryRun, logger); err != nil {
 		logger.Error("client exited with error", "err", err)
 		os.Exit(1)
 	}
@@ -132,26 +133,7 @@ func detectLocalIP() string {
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
-func run(ctx context.Context, cfg *config.ClientConfig, rescan bool, logger *slog.Logger) error {
-	db, err := sql.Open("mysql", cfg.Postgres.DSN)
-	if err != nil {
-		return fmt.Errorf("open db: %w", err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(3)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("connect db: %w", err)
-	}
-
-	cat := catalog.New(db)
-
-	if err := cat.EnsurePartition(ctx, cfg.ServerID); err != nil {
-		return fmt.Errorf("ensure partition: %w", err)
-	}
-
+func run(ctx context.Context, cfg *config.ClientConfig, rescan, dryRun bool, logger *slog.Logger) error {
 	rules := buildRules(cfg)
 
 	f := &filter.Filter{
@@ -161,19 +143,46 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan bool, logger *slo
 		Events:      cfg.Filters.Events,
 	}
 
-	s := scanner.New(cfg.ServerID, cfg.Volumes, rules, cat, f, logger)
+	// In dry-run mode the database, full scan and management API are all skipped;
+	// monitors just log detected events. Used for smoke-testing the USN pipeline.
+	var cat *catalog.Catalog
+	var s *scanner.Scanner
 
-	if rescan {
-		// Record each volume's current USN before scanning so the monitor
-		// resumes from the pre-scan position; changes made during the scan are
-		// then caught by the journal instead of falling into a gap between
-		// "scanned" and "monitoring started". Only seeds volumes without an
-		// existing checkpoint so a live checkpoint is never clobbered.
-		seedCheckpoints(cfg, logger)
+	if dryRun {
+		logger.Info("dry-run mode: file events are logged only, not written to the database")
+	} else {
+		db, err := sql.Open("mysql", cfg.Postgres.DSN)
+		if err != nil {
+			return fmt.Errorf("open db: %w", err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(10)
+		db.SetMaxIdleConns(3)
+		db.SetConnMaxLifetime(5 * time.Minute)
 
-		logger.Info("starting full scan")
-		if err := s.Run(ctx); err != nil {
-			return fmt.Errorf("full scan: %w", err)
+		if err := db.PingContext(ctx); err != nil {
+			return fmt.Errorf("connect db: %w", err)
+		}
+
+		cat = catalog.New(db)
+		if err := cat.EnsurePartition(ctx, cfg.ServerID); err != nil {
+			return fmt.Errorf("ensure partition: %w", err)
+		}
+
+		s = scanner.New(cfg.ServerID, cfg.Volumes, rules, cat, f, logger)
+
+		if rescan {
+			// Record each volume's current USN before scanning so the monitor
+			// resumes from the pre-scan position; changes made during the scan are
+			// then caught by the journal instead of falling into a gap between
+			// "scanned" and "monitoring started". Only seeds volumes without an
+			// existing checkpoint so a live checkpoint is never clobbered.
+			seedCheckpoints(cfg, logger)
+
+			logger.Info("starting full scan")
+			if err := s.Run(ctx); err != nil {
+				return fmt.Errorf("full scan: %w", err)
+			}
 		}
 	}
 
@@ -182,7 +191,7 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan bool, logger *slo
 
 	var wg sync.WaitGroup
 
-	if cfg.API.Listen != "" {
+	if !dryRun && cfg.API.Listen != "" {
 		api := clientapi.New(cfg, func(ctx context.Context) error {
 			return s.Run(ctx)
 		})
@@ -208,6 +217,7 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan bool, logger *slo
 			PollIntervalMs: cfg.PollIntervalMs,
 			RenameWindowMs: cfg.RenameWindowMs,
 			CacheSize:      cfg.PathResolverCacheSize,
+			DryRun:         dryRun,
 			Logger:         logger,
 		})
 		wg.Add(1)
@@ -268,6 +278,7 @@ func seedCheckpoints(cfg *config.ClientConfig, logger *slog.Logger) {
 type windowsService struct {
 	cfg    *config.ClientConfig
 	rescan bool
+	dryRun bool
 	logger *slog.Logger
 }
 
@@ -279,7 +290,7 @@ func (s *windowsService) Execute(args []string, req <-chan svc.ChangeRequest, st
 	defer cancel()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- run(ctx, s.cfg, s.rescan, s.logger) }()
+	go func() { errCh <- run(ctx, s.cfg, s.rescan, s.dryRun, s.logger) }()
 
 	status <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 
@@ -322,7 +333,7 @@ func buildLogger(logPath string) *slog.Logger {
 	}))
 }
 
-func runAsService(cfg *config.ClientConfig, rescan bool, logger *slog.Logger) {
+func runAsService(cfg *config.ClientConfig, rescan, dryRun bool, logger *slog.Logger) {
 	elog, err := eventlog.Open(serviceName)
 	if err != nil {
 		elog, _ = eventlog.Open("")
@@ -337,7 +348,7 @@ func runAsService(cfg *config.ClientConfig, rescan bool, logger *slog.Logger) {
 		os.Exit(1)
 	}
 
-	handler := &windowsService{cfg: cfg, rescan: rescan, logger: logger}
+	handler := &windowsService{cfg: cfg, rescan: rescan, dryRun: dryRun, logger: logger}
 
 	var runFn func(string, svc.Handler) error
 	if isInteractive {
