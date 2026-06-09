@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>diskmon</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.5 system-ui,sans-serif;background:#f5f6fa;color:#333}
+header{background:#1e2a3a;color:#fff;padding:12px 24px;display:flex;align-items:center;gap:24px}
+header h1{font-size:18px;font-weight:600;letter-spacing:.5px}
+nav button{background:none;border:none;color:#aac;cursor:pointer;font-size:14px;padding:6px 14px;border-radius:4px}
+nav button.active{background:#2d6cf6;color:#fff}
+main{padding:24px;max-width:1200px;margin:0 auto}
+.tab{display:none}.tab.active{display:block}
+
+/* 工具栏 */
+.toolbar{display:flex;gap:10px;margin-bottom:18px;align-items:center;flex-wrap:wrap}
+input,select{border:1px solid #d0d4de;border-radius:4px;padding:6px 10px;font-size:13px}
+input:focus,select:focus{outline:2px solid #2d6cf6;border-color:#2d6cf6}
+button.btn{background:#2d6cf6;color:#fff;border:none;border-radius:4px;padding:7px 16px;cursor:pointer;font-size:13px}
+button.btn:hover{background:#1a57e0}
+button.btn.danger{background:#e53e3e}button.btn.danger:hover{background:#c53030}
+button.btn.grey{background:#6b7280}button.btn.grey:hover{background:#4b5563}
+button.btn.sm{padding:4px 10px;font-size:12px}
+button.btn:disabled{opacity:.5;cursor:default}
+
+/* 服务器表格 */
+.srv-table-wrap{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500}
+.badge.ok{background:#d1fae5;color:#065f46}
+.badge.err{background:#fee2e2;color:#991b1b}
+.badge.unk{background:#e5e7eb;color:#374151}
+.badge.warn{background:#fef3c7;color:#92400e}
+
+/* ── 文件浏览器布局 ── */
+.file-browser{display:flex;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.08);min-height:560px;overflow:hidden}
+.srv-sidebar{width:180px;border-right:1px solid #eef0f5;flex-shrink:0;display:flex;flex-direction:column}
+.srv-sidebar-title{font-size:11px;color:#9ca3af;font-weight:600;padding:14px 14px 8px;text-transform:uppercase;letter-spacing:.5px}
+.srv-item{padding:9px 14px;cursor:pointer;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .12s}
+.srv-item:hover{background:#f5f6fa}
+.srv-item.active{background:#eff6ff;color:#2d6cf6;font-weight:600;border-right:3px solid #2d6cf6}
+.file-panel{flex:1;min-width:0;display:flex;flex-direction:column}
+
+/* 搜索栏 */
+.search-bar{display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid #eef0f5;flex-wrap:wrap;align-items:center}
+.search-bar input{flex:1;min-width:120px}
+.search-bar select{min-width:100px}
+
+/* 文件表格 */
+.file-table-wrap{flex:1;overflow-y:auto}
+table{width:100%;border-collapse:collapse}
+th{background:#f8f9fb;text-align:left;padding:9px 14px;font-size:12px;color:#6b7280;font-weight:600;position:sticky;top:0;z-index:1}
+td{padding:8px 14px;border-top:1px solid #f3f4f6;font-size:13px}
+tr:hover td{background:#fafbfc}
+td.name{display:flex;align-items:center;gap:8px;max-width:420px}
+td.name .icon{font-size:15px;flex-shrink:0}
+td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag{display:inline-block;background:#eff6ff;color:#2563eb;border-radius:4px;padding:1px 7px;font-size:11px;font-weight:500}
+
+/* 分页 */
+.pg-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid #eef0f5;font-size:12px;color:#6b7280}
+.pg-bar button{padding:3px 12px;font-size:12px}
+
+/* 弹窗 */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}
+.modal-bg.show{display:flex}
+.modal{background:#fff;border-radius:10px;padding:28px;width:480px;max-width:95vw;max-height:90vh;overflow-y:auto}
+.modal h2{font-size:16px;margin-bottom:18px}
+.form-row{margin-bottom:14px}
+.form-row label{display:block;font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:500}
+.form-row input,.form-row select{width:100%}
+.form-actions{display:flex;gap:10px;margin-top:20px;justify-content:flex-end}
+.log-box{background:#1e2a3a;color:#a8d5a2;font:13px/1.6 monospace;padding:16px;border-radius:6px;white-space:pre-wrap;max-height:450px;overflow-y:auto;margin-top:12px}
+.empty{text-align:center;color:#9ca3af;padding:48px;font-size:13px}
+.alert{padding:10px 14px;border-radius:5px;margin-bottom:14px;font-size:13px}
+.alert.ok{background:#d1fae5;color:#065f46}
+.alert.err{background:#fee2e2;color:#991b1b}
+</style>
+</head>
+<body>
+<header>
+  <h1>diskmon</h1>
+  <nav>
+    <button class="active" onclick="showTab('servers',this)">服务器</button>
+    <button onclick="showTab('files',this)">文件浏览</button>
+  </nav>
+</header>
+<main>
+
+<!-- ══ 服务器 tab ══════════════════════════════════ -->
+<div id="tab-servers" class="tab active">
+  <div class="toolbar">
+    <button class="btn" onclick="openAddServer()">+ 添加服务器</button>
+    <button class="btn grey" onclick="loadServers()">刷新</button>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+      <span style="font-size:12px;color:#6b7280">AList</span>
+      <span id="alist-badge" class="badge unk">未检测</span>
+      <button class="btn grey sm" onclick="testAList()">连通性测试</button>
+    </div>
+  </div>
+  <div id="alist-detail" style="margin-bottom:14px"></div>
+  <div class="srv-table-wrap">
+    <table id="server-table">
+      <thead>
+        <tr>
+          <th style="width:18%">名称</th>
+          <th style="width:14%">Server ID</th>
+          <th style="width:16%">SMB 主机</th>
+          <th style="width:18%">管理 API</th>
+          <th style="width:10%">状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="server-list"><tr><td colspan="6" class="empty">加载中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ══ 文件浏览 tab ════════════════════════════════ -->
+<div id="tab-files" class="tab">
+  <div class="file-browser">
+
+    <!-- 左侧服务器列表 -->
+    <div class="srv-sidebar">
+      <div class="srv-sidebar-title">服务器</div>
+      <div id="srv-sidebar-list"><div style="padding:14px;font-size:12px;color:#9ca3af">加载中…</div></div>
+    </div>
+
+    <!-- 右侧文件区 -->
+    <div class="file-panel">
+      <!-- 搜索栏 -->
+      <div class="search-bar">
+        <input id="f-prefix" placeholder="路径前缀，如 D:\drawings\" style="flex:2">
+        <input id="f-bizkey" placeholder="业务号 biz_key" style="flex:1">
+        <input id="f-ext" placeholder="后缀 .pdf" style="width:90px;flex:none">
+        <select id="f-isdir" style="flex:none">
+          <option value="">全部</option>
+          <option value="false">仅文件</option>
+          <option value="true">仅目录</option>
+        </select>
+        <button class="btn" onclick="searchFiles(0)">查询</button>
+        <button class="btn grey" onclick="clearFileSearch()">清空</button>
+      </div>
+
+      <!-- 文件表格 -->
+      <div class="file-table-wrap" id="file-table-wrap">
+        <div class="empty">← 从左侧选择一台服务器</div>
+      </div>
+
+      <!-- 分页 -->
+      <div class="pg-bar" id="pg-bar" style="display:none">
+        <button class="btn grey sm" id="pg-prev" onclick="searchFiles(fileOffset-fileLimit)">上一页</button>
+        <span id="pg-info"></span>
+        <button class="btn grey sm" id="pg-next" onclick="searchFiles(fileOffset+fileLimit)">下一页</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</main>
+
+<!-- ══ 添加服务器弹窗 ══════════════════════════════ -->
+<div class="modal-bg" id="modal-add">
+  <div class="modal">
+    <h2>添加 Windows 服务器</h2>
+    <div id="add-alert"></div>
+    <div class="form-row"><label>Server ID *</label><input id="a-id" placeholder="server-a"></div>
+    <div class="form-row"><label>名称</label><input id="a-name" placeholder="工厂A 图档服务器"></div>
+    <div class="form-row"><label>SMB 主机 IP</label><input id="a-smb" placeholder="192.168.1.10"></div>
+    <div class="form-row"><label>SMB 用户名</label><input id="a-user" placeholder="zjit"></div>
+    <div class="form-row"><label>SMB 密码</label><input id="a-pass" type="password"></div>
+    <div class="form-row"><label>Client 管理 API 地址</label><input id="a-api" placeholder="192.168.1.10:19090"></div>
+    <div class="form-row"><label>Client API Token（可空）</label><input id="a-token" placeholder="留空则不鉴权"></div>
+    <div class="form-actions">
+      <button class="btn grey" onclick="closeModal('modal-add')">取消</button>
+      <button class="btn" onclick="submitAddServer()">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 日志弹窗 ════════════════════════════════════ -->
+<div class="modal-bg" id="modal-logs">
+  <div class="modal" style="width:700px">
+    <h2 id="log-title">日志</h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <input id="log-lines" type="number" value="200" style="width:80px"> 行
+      <button class="btn sm" onclick="reloadLogs()">刷新</button>
+      <button class="btn grey sm" style="margin-left:auto" onclick="closeModal('modal-logs')">关闭</button>
+    </div>
+    <div class="log-box" id="log-content">加载中...</div>
+  </div>
+</div>
+
+<script>
+let currentLogServer = '';
+let fileOffset = 0;
+const fileLimit = 50;
+let currentServerID = '';
+let serversCache = [];
+
+// ── Tab 切换 ──────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'files') loadSidebar();
+}
+
+// ── 通用请求 ──────────────────────────────────────
+async function api(method, path, body) {
+  const opt = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  const text = await r.text();
+  try { return { ok: r.ok, status: r.status, data: JSON.parse(text) }; }
+  catch { return { ok: r.ok, status: r.status, data: text }; }
+}
+
+// ── 服务器列表（表格） ────────────────────────────
+async function loadServers() {
+  const tbody = document.getElementById('server-list');
+  const { ok, data } = await api('GET', '/api/servers');
+  serversCache = (ok && data) ? data : [];
+  if (!serversCache.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无服务器，点击「添加服务器」注册第一台</td></tr>';
+    return;
+  }
+  tbody.innerHTML = serversCache.map(s => `
+    <tr>
+      <td style="font-weight:500">${s.name || '—'}</td>
+      <td style="color:#6b7280;font-size:12px">${s.server_id}</td>
+      <td style="font-size:12px">${s.smb_host ? s.smb_host + '<br><span style="color:#9ca3af">' + (s.smb_user||'') + '</span>' : '—'}</td>
+      <td style="font-size:12px">${s.api_addr || '<span style="color:#9ca3af">未配置</span>'}</td>
+      <td><span class="badge unk" id="badge-${s.server_id}">检查中</span></td>
+      <td>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn sm grey" onclick="checkHealth('${s.server_id}')">连通检测</button>
+          <button class="btn sm" onclick="showLogs('${s.server_id}')">日志</button>
+          <button class="btn sm grey" onclick="doRescan('${s.server_id}')">重新扫描</button>
+          <button class="btn sm grey" onclick="doRestart('${s.server_id}')">重启</button>
+          <button class="btn sm danger" onclick="deleteServer('${s.server_id}')">删除</button>
+        </div>
+      </td>
+    </tr>`).join('');
+  serversCache.forEach(s => checkHealth(s.server_id));
+}
+
+async function checkHealth(id) {
+  const badge = document.getElementById('badge-' + id);
+  if (!badge) return;
+  badge.textContent = '检查中'; badge.className = 'badge unk';
+  try {
+    const { ok, data } = await api('GET', `/api/clients/${id}/health`);
+    if (ok) {
+      badge.textContent = '在线'; badge.className = 'badge ok';
+    } else {
+      badge.textContent = '离线'; badge.className = 'badge err';
+    }
+  } catch {
+    badge.textContent = '未知'; badge.className = 'badge unk';
+  }
+}
+
+// ── 文件浏览左侧边栏 ──────────────────────────────
+async function loadSidebar() {
+  const el = document.getElementById('srv-sidebar-list');
+  const { ok, data } = await api('GET', '/api/servers');
+  serversCache = (ok && data) ? data : [];
+  if (!serversCache.length) {
+    el.innerHTML = '<div style="padding:14px;font-size:12px;color:#9ca3af">暂无服务器</div>';
+    return;
+  }
+  el.innerHTML = serversCache.map(s => `
+    <div class="srv-item${currentServerID===s.server_id?' active':''}"
+         onclick="selectServer('${s.server_id}')"
+         title="${s.server_id}">
+      ${s.name || s.server_id}
+    </div>`).join('');
+}
+
+function selectServer(id) {
+  currentServerID = id;
+  // 高亮侧边栏
+  document.querySelectorAll('.srv-item').forEach(el => {
+    el.classList.toggle('active', el.getAttribute('onclick').includes(`'${id}'`));
+  });
+  // 清空搜索条件，加载该服务器的文件
+  document.getElementById('f-prefix').value = '';
+  document.getElementById('f-bizkey').value = '';
+  document.getElementById('f-ext').value = '';
+  document.getElementById('f-isdir').value = '';
+  searchFiles(0);
+}
+
+function clearFileSearch() {
+  document.getElementById('f-prefix').value = '';
+  document.getElementById('f-bizkey').value = '';
+  document.getElementById('f-ext').value = '';
+  document.getElementById('f-isdir').value = '';
+  if (currentServerID) searchFiles(0);
+}
+
+// ── 文件查询 ──────────────────────────────────────
+async function searchFiles(offset) {
+  if (!currentServerID) return;
+  if (offset < 0) offset = 0;
+  fileOffset = offset;
+
+  const params = new URLSearchParams({ server_id: currentServerID, limit: fileLimit, offset });
+  const prefix = document.getElementById('f-prefix').value.trim();
+  const bizkey = document.getElementById('f-bizkey').value.trim();
+  const ext    = document.getElementById('f-ext').value.trim();
+  const isdir  = document.getElementById('f-isdir').value;
+  if (prefix) params.set('path_prefix', prefix);
+  if (bizkey) params.set('biz_key', bizkey);
+  if (ext)    params.set('ext', ext);
+  if (isdir)  params.set('is_dir', isdir);
+
+  const wrap = document.getElementById('file-table-wrap');
+  wrap.innerHTML = '<div class="empty">查询中…</div>';
+  document.getElementById('pg-bar').style.display = 'none';
+
+  const { ok, data } = await api('GET', '/api/files?' + params);
+  if (!ok) {
+    wrap.innerHTML = `<div class="empty" style="color:#e53e3e">查询失败</div>`;
+    return;
+  }
+  if (!data || !data.length) {
+    wrap.innerHTML = '<div class="empty">该条件下暂无数据</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th style="width:40%">名称 / 路径</th>
+          <th style="width:12%">类型</th>
+          <th style="width:12%">大小</th>
+          <th style="width:12%">业务号</th>
+          <th style="width:12%">后缀</th>
+          <th style="width:12%">更新时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.map(f => {
+          const isDir = f.is_dir;
+          const icon  = isDir ? '📁' : fileIcon(f.ext);
+          const name  = lastName(f.path);
+          const short = f.path.length > 60 ? '…' + f.path.slice(-58) : f.path;
+          return `<tr>
+            <td class="name" title="${f.path}">
+              <span class="icon">${icon}</span>
+              <span class="path-text">
+                <span style="font-weight:${isDir?600:400}">${name}</span>
+                <br><span style="font-size:11px;color:#9ca3af">${short}</span>
+              </span>
+            </td>
+            <td>${isDir ? '<span class="tag">目录</span>' : '文件'}</td>
+            <td>${f.size != null ? fmtSize(f.size) : '—'}</td>
+            <td>${f.biz_key ? `<span class="tag">${f.biz_key}</span>` : '—'}</td>
+            <td>${f.ext || '—'}</td>
+            <td>${f.updated_at ? f.updated_at.slice(0,16).replace('T',' ') : '—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+
+  // 分页
+  const pg = document.getElementById('pg-bar');
+  pg.style.display = 'flex';
+  document.getElementById('pg-info').textContent =
+    `第 ${offset + 1}–${offset + data.length} 条`;
+  document.getElementById('pg-prev').disabled = offset === 0;
+  document.getElementById('pg-next').disabled = data.length < fileLimit;
+}
+
+// ── 工具函数 ──────────────────────────────────────
+function lastName(path) {
+  const p = path.replace(/\\/g, '/');
+  return p.split('/').filter(Boolean).pop() || path;
+}
+function fmtSize(n) {
+  if (n === 0) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
+  return (n/1073741824).toFixed(2) + ' GB';
+}
+function fileIcon(ext) {
+  if (!ext) return '📄';
+  const e = ext.toLowerCase();
+  if (['.pdf'].includes(e)) return '📕';
+  if (['.dwg','.dxf'].includes(e)) return '📐';
+  if (['.xls','.xlsx','.csv'].includes(e)) return '📊';
+  if (['.doc','.docx'].includes(e)) return '📝';
+  if (['.jpg','.jpeg','.png','.bmp','.tif'].includes(e)) return '🖼';
+  if (['.zip','.rar','.7z'].includes(e)) return '🗜';
+  return '📄';
+}
+
+// ── 添加服务器 ────────────────────────────────────
+function openAddServer() {
+  document.getElementById('add-alert').innerHTML = '';
+  ['a-id','a-name','a-smb','a-user','a-pass','a-api','a-token'].forEach(id =>
+    document.getElementById(id).value = '');
+  document.getElementById('modal-add').classList.add('show');
+}
+async function submitAddServer() {
+  const id = document.getElementById('a-id').value.trim();
+  if (!id) { showAlert('add-alert','server_id 必填',true); return; }
+  const body = {
+    server_id: id, name: document.getElementById('a-name').value.trim(),
+    smb_host: document.getElementById('a-smb').value.trim(),
+    smb_user: document.getElementById('a-user').value.trim(),
+    smb_pass: document.getElementById('a-pass').value,
+    api_addr: document.getElementById('a-api').value.trim(),
+    api_token: document.getElementById('a-token').value.trim(),
+  };
+  const { ok, data } = await api('POST', '/api/servers', body);
+  if (ok) { closeModal('modal-add'); loadServers(); }
+  else showAlert('add-alert', (data && data.error) || '添加失败', true);
+}
+async function deleteServer(id) {
+  if (!confirm(`确认删除服务器 ${id}？\n将同时删除文件目录分区！`)) return;
+  const { ok } = await api('DELETE', `/api/servers/${id}`);
+  if (ok) loadServers();
+}
+
+// ── Client 管理 ───────────────────────────────────
+async function showLogs(id) {
+  currentLogServer = id;
+  document.getElementById('log-title').textContent = `日志 — ${id}`;
+  document.getElementById('modal-logs').classList.add('show');
+  reloadLogs();
+}
+async function reloadLogs() {
+  const lines = document.getElementById('log-lines').value || 200;
+  const el = document.getElementById('log-content');
+  el.textContent = '加载中...';
+  const { ok, data } = await api('GET', `/api/clients/${currentLogServer}/logs?lines=${lines}`);
+  el.textContent = ok ? (data || '（无日志内容）') : `错误: ${data?.error || '无法连接 client'}`;
+  el.scrollTop = el.scrollHeight;
+}
+async function doRescan(id) {
+  if (!confirm(`确认触发服务器 ${id} 全量重新扫描？\n这将清空并重建文件目录。`)) return;
+  const { ok, data } = await api('POST', `/api/clients/${id}/rescan`);
+  alert(ok ? '✓ 重扫已启动，可查看日志跟踪进度' : `失败: ${data?.error || '无法连接 client'}`);
+}
+async function doRestart(id) {
+  if (!confirm(`确认重启服务器 ${id} 的 diskmon-client 服务？`)) return;
+  const { ok, data } = await api('POST', `/api/clients/${id}/restart`);
+  alert(ok ? '✓ 重启指令已发送' : `失败: ${data?.error || '无法连接 client'}`);
+}
+
+// ── AList 连通性测试 ──────────────────────────────
+async function testAList() {
+  const badge = document.getElementById('alist-badge');
+  const detail = document.getElementById('alist-detail');
+  badge.textContent = '检测中…'; badge.className = 'badge unk';
+  detail.innerHTML = '';
+  const { ok, data } = await api('GET', '/api/alist/ping');
+  if (!ok) { badge.textContent = '请求失败'; badge.className = 'badge err'; return; }
+  if (!data.configured) {
+    badge.textContent = '未配置'; badge.className = 'badge unk';
+    detail.innerHTML = `<div class="alert err">${data.message}</div>`; return;
+  }
+  if (data.ok) {
+    badge.textContent = '连通'; badge.className = 'badge ok';
+    detail.innerHTML = `<div class="alert ok">✓ 连接成功 &nbsp;|&nbsp; 地址: ${data.url} &nbsp;|&nbsp; 用户: ${data.username} &nbsp;|&nbsp; 延迟: ${data.latency_ms} ms</div>`;
+  } else {
+    badge.textContent = '失败'; badge.className = 'badge err';
+    detail.innerHTML = `<div class="alert err">✗ 连接失败 &nbsp;|&nbsp; 地址: ${data.url}<br>错误: ${data.error}</div>`;
+  }
+}
+
+// ── 弹窗 ──────────────────────────────────────────
+function showAlert(elId, msg, isErr) {
+  document.getElementById(elId).innerHTML =
+    `<div class="alert ${isErr?'err':'ok'}">${msg}</div>`;
+}
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+document.querySelectorAll('.modal-bg').forEach(m =>
+  m.addEventListener('click', e => { if (e.target===m) m.classList.remove('show'); }));
+
+loadServers();
+</script>
+</body>
+</html>

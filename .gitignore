@@ -1,0 +1,20 @@
+# binaries
+/bin/
+/server
+*.exe
+
+# build output
+/dist/
+
+# env / secrets
+.env
+*.env
+config.local.yaml
+
+# IDE
+.idea/
+.vscode/
+*.user
+
+# Go
+vendor/
