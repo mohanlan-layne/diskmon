@@ -97,11 +97,31 @@ func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	mounts, warn, err := h.registerSMBMounts(ctx, body.SmbShare, body.SmbRoot, body.Dirs, smbHost, smbUser, smbPass)
+	ac, err := alist.New(h.alistCfg.URL, h.alistCfg.Username, h.alistCfg.Password)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadGateway)
+		jsonError(w, "连接 AList 失败: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	mounts := AListMounts{Base: strings.TrimRight(h.alistCfg.URL, "/")}
+	for _, dir := range body.Dirs {
+		rel, ok := splitByPrefix(dir, body.SmbRoot)
+		if !ok {
+			jsonError(w, fmt.Sprintf("目录 %s 不在 SMB 根 %s 之下", dir, body.SmbRoot), http.StatusBadRequest)
+			return
+		}
+		mountPath := "/" + lastSegment(dir)
+		if _, err := ac.AddSMBStorage(ctx, mountPath, smbHost, body.SmbShare, rel, smbUser, smbPass); err != nil {
+			jsonError(w, fmt.Sprintf("AList 挂载 %s 失败: %v", dir, err), http.StatusBadGateway)
+			return
+		}
+		mounts.Mounts = append(mounts.Mounts, AListMount{
+			Prefix: strings.ReplaceAll(strings.TrimRight(dir, `\/`), "/", `\`),
+			Mount:  mountPath,
+		})
+	}
+
+	guestErr := ac.EnsureGuestRead(ctx)
 
 	stored, _ := marshalAListMounts(mounts)
 	if _, err := h.db.ExecContext(ctx,
@@ -112,46 +132,10 @@ func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) 
 	}
 
 	resp := map[string]any{"mounts": mounts.Mounts}
-	if warn != "" {
-		resp["alist_warning"] = warn
+	if guestErr != nil {
+		resp["alist_warning"] = "存储已建，但开启 guest 访问失败: " + guestErr.Error()
 	}
 	jsonOK(w, resp)
-}
-
-// registerSMBMounts creates one AList SMB-driver storage per directory (exposing
-// only the leaf name to hide the system path) and enables guest read access.
-// Returns the prefix→mount map, a non-fatal warning (e.g. guest enabling failed),
-// and a fatal error.
-func (h *ServersHandler) registerSMBMounts(ctx context.Context, smbShare, smbRoot string, dirs []string, smbHost, smbUser, smbPass string) (AListMounts, string, error) {
-	if h.alistCfg.URL == "" || h.alistCfg.Password == "" {
-		return AListMounts{}, "", fmt.Errorf("AList 未配置（server 端 alist.url / 密码为空）")
-	}
-	ac, err := alist.New(h.alistCfg.URL, h.alistCfg.Username, h.alistCfg.Password)
-	if err != nil {
-		return AListMounts{}, "", fmt.Errorf("连接 AList 失败: %w", err)
-	}
-
-	mounts := AListMounts{Base: strings.TrimRight(h.alistCfg.URL, "/")}
-	for _, dir := range dirs {
-		rel, ok := splitByPrefix(dir, smbRoot)
-		if !ok {
-			return AListMounts{}, "", fmt.Errorf("目录 %s 不在 SMB 根 %s 之下", dir, smbRoot)
-		}
-		mountPath := "/" + lastSegment(dir)
-		if _, err := ac.AddSMBStorage(ctx, mountPath, smbHost, smbShare, rel, smbUser, smbPass); err != nil {
-			return AListMounts{}, "", fmt.Errorf("AList 挂载 %s 失败: %w", dir, err)
-		}
-		mounts.Mounts = append(mounts.Mounts, AListMount{
-			Prefix: strings.ReplaceAll(strings.TrimRight(dir, `\/`), "/", `\`),
-			Mount:  mountPath,
-		})
-	}
-
-	warn := ""
-	if err := ac.EnsureGuestRead(ctx); err != nil {
-		warn = "存储已建，但开启 guest 访问失败: " + err.Error()
-	}
-	return mounts, warn, nil
 }
 
 // lastSegment returns the final path component of a Windows/Unix path.
@@ -243,8 +227,6 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 		Volumes  json.RawMessage `json:"volumes"`
 		APIAddr  string          `json:"api_addr"`
 		APIToken string          `json:"api_token"`
-		SmbShare string          `json:"smb_share"` // for AList SMB mount
-		Dirs     []string        `json:"dirs"`      // directories to expose in AList
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -257,30 +239,14 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Build AList SMB mounts (also enables guest) when share + root + dirs given,
-	// so adding a server syncs its SMB storages to AList in one step.
-	var alistURLsJSON any
-	var alistWarn string
-	if body.SmbShare != "" && body.SysRoot != "" && len(body.Dirs) > 0 {
-		mounts, warn, err := h.registerSMBMounts(ctx, body.SmbShare, body.SysRoot, body.Dirs,
-			body.SmbHost, body.SmbUser, body.SmbPass)
-		if err != nil {
-			jsonError(w, "AList 挂载失败: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		alistWarn = warn
-		if s, e := marshalAListMounts(mounts); e == nil {
-			alistURLsJSON = s
-		}
-	}
-
+	// AList storages are configured separately via POST /api/servers/{id}/alist.
 	res, err := h.db.ExecContext(ctx, `
 		INSERT INTO servers (server_id, name, smb_host, smb_user, smb_pass, sys_root,
-		                     volumes, api_addr, api_token, alist_urls)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		                     volumes, api_addr, api_token)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
 		body.ServerID, body.Name, body.SmbHost, body.SmbUser, body.SmbPass,
 		body.SysRoot, nullJSON(body.Volumes),
-		nullStr(body.APIAddr), nullStr(body.APIToken), alistURLsJSON,
+		nullStr(body.APIAddr), nullStr(body.APIToken),
 	)
 	if err != nil {
 		jsonError(w, "insert failed: "+err.Error(), http.StatusInternalServerError)
@@ -292,12 +258,8 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 		_ = err
 	}
 
-	resp := map[string]any{"id": id}
-	if alistWarn != "" {
-		resp["alist_warning"] = alistWarn
-	}
 	w.WriteHeader(http.StatusCreated)
-	jsonOK(w, resp)
+	jsonOK(w, map[string]any{"id": id})
 }
 
 func (h *ServersHandler) get(w http.ResponseWriter, r *http.Request) {
