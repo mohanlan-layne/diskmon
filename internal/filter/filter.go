@@ -92,6 +92,15 @@ func (f *Filter) isIncluded(path string) bool {
 	return false
 }
 
+// IsUnderIncludeDirs reports whether path is under any of the include directories.
+// Used externally to decide whether to log a filtered-out event.
+func (f *Filter) IsUnderIncludeDirs(path string) bool {
+	if len(f.IncludeDirs) == 0 {
+		return true
+	}
+	return f.isIncluded(path)
+}
+
 func (f *Filter) isExcluded(path string) bool {
 	for _, dir := range f.ExcludeDirs {
 		if isUnder(path, dir) {

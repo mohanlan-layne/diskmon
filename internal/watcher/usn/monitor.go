@@ -195,9 +195,6 @@ func (m *Monitor) readCycle(
 			break // no new records
 		}
 
-		if len(records) > 0 {
-			m.logger.Debug("USN batch read", "records", len(records), "fromUSN", currentUSN, "nextUSN", nextUSN)
-		}
 		for _, rec := range records {
 			evts := m.processRecord(rec, resolver, pendingOld, pendingNew)
 			events = append(events, evts...)
@@ -220,14 +217,6 @@ func (m *Monitor) processRecord(
 	// Resolve path: try parent FRN + filename first, fall back to direct FRN.
 	path := m.resolvePath(rec, resolver)
 
-	m.logger.Debug("USN record",
-		"file", rec.FileName,
-		"reason", fmt.Sprintf("0x%08x", rec.Reason),
-		"isDir", isDir,
-		"path", path,
-		"frn", rec.FRN,
-	)
-
 	if IsRenameOld(rec.Reason) {
 		if path != "" {
 			pendingOld[rec.FRN] = pendingRename{path: path, timestamp: occuredAt}
@@ -237,7 +226,6 @@ func (m *Monitor) processRecord(
 
 	if IsRenameNew(rec.Reason) {
 		if path == "" {
-			m.logger.Debug("USN rename-new: path unresolvable, treating old as remove", "frn", rec.FRN)
 			if old, ok := pendingOld[rec.FRN]; ok {
 				delete(pendingOld, rec.FRN)
 				return []model.ChangeEvent{{
@@ -262,12 +250,7 @@ func (m *Monitor) processRecord(
 	}
 
 	eventType := MapEventType(rec.Reason)
-	if eventType == "" {
-		m.logger.Debug("USN record skipped: unmapped reason", "file", rec.FileName, "reason", fmt.Sprintf("0x%08x", rec.Reason))
-		return nil
-	}
-	if path == "" {
-		m.logger.Debug("USN record skipped: path unresolvable", "file", rec.FileName, "frn", rec.FRN)
+	if eventType == "" || path == "" {
 		return nil
 	}
 
@@ -287,10 +270,12 @@ func (m *Monitor) processRecord(
 	enrichSize(&evt)
 
 	if !m.filter.Match(evt) {
-		m.logger.Debug("USN record filtered out", "type", eventType, "path", path, "ext", evt.Ext)
+		// 只在路径属于监听目录时记录被过滤的原因（如后缀不匹配）
+		if m.filter.IsUnderIncludeDirs(path) {
+			m.logger.Info("file detected but filtered", "type", eventType, "path", path, "ext", evt.Ext)
+		}
 		return nil
 	}
-	m.logger.Debug("USN record accepted", "type", eventType, "path", path)
 	return []model.ChangeEvent{evt}
 }
 
