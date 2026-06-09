@@ -100,6 +100,23 @@ func (h *DownloadHandler) zipPack(w http.ResponseWriter, r *http.Request) {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
+	// AList-backed servers: the server pod has no local SMB mount, so stream the
+	// files from AList (anonymous list/get/download). resolveURLPath maps the
+	// Windows path to the AList virtual path; lastSegment names the archive's
+	// top-level entry (folder name for a directory, file name for a file).
+	if mounts, err := loadAListMounts(r.Context(), h.db, body.ServerID); err == nil {
+		z := newAListZipper(mounts.Base)
+		for _, path := range body.Paths {
+			alistPath, ok := mounts.resolveURLPath(path, false)
+			if !ok {
+				continue
+			}
+			_ = z.addToZip(r.Context(), zw, alistPath, lastSegment(path))
+		}
+		return
+	}
+
+	// Fallback: local SMB mount on the server pod.
 	for _, path := range body.Paths {
 		localPath, err := h.resolveSMBPath(body.ServerID, path)
 		if err != nil {
