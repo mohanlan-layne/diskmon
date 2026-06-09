@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -45,29 +46,42 @@ func loadAListMounts(ctx context.Context, db *sql.DB, serverID string) (AListMou
 }
 
 // resolveURLPath turns a full Windows path into the AList virtual path
-// (mount + relative, URL-escaped), choosing the longest matching directory.
-// Returns ("", false) when no configured mount contains the path.
-func (m AListMounts) resolveURLPath(winPath string) (string, bool) {
-	var bestMount AListMount
+// (mount + relative), choosing the longest matching directory. When escape is
+// true each path segment is percent-encoded. Returns ("", false) when no
+// configured mount contains the path.
+func (m AListMounts) resolveURLPath(winPath string, escape bool) (string, bool) {
+	var best string
 	bestLen := -1
 	for _, mt := range m.Mounts {
 		if rel, ok := splitByPrefix(winPath, mt.Prefix); ok {
 			if l := len(mt.Prefix); l > bestLen {
 				bestLen = l
-				bestMount = AListMount{Prefix: mt.Prefix, Mount: mt.Mount}
-				bestMount.Mount = joinMountRel(mt.Mount, rel)
+				best = joinMountRel(mt.Mount, rel, escape)
 			}
 		}
 	}
 	if bestLen < 0 {
 		return "", false
 	}
-	return bestMount.Mount, true
+	return best, true
 }
 
-// fileURL returns the AList direct-download URL for a Windows path.
+// fileURL returns the AList direct-download URL for a Windows path with a raw
+// (unescaped) path. Suitable for http.Redirect, which percent-encodes non-ASCII
+// itself; double-encoding would otherwise occur.
 func (m AListMounts) fileURL(winPath string) (string, bool) {
-	rel, ok := m.resolveURLPath(winPath)
+	rel, ok := m.resolveURLPath(winPath, false)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimRight(m.Base, "/") + "/d" + rel, true
+}
+
+// previewFileURL returns the AList direct-download URL with each path segment
+// percent-encoded (Chinese → %E7…). This is the form embedded (Base64-encoded)
+// in the kkFileView preview URL, where no later auto-encoding happens.
+func (m AListMounts) previewFileURL(winPath string) (string, bool) {
+	rel, ok := m.resolveURLPath(winPath, true)
 	if !ok {
 		return "", false
 	}
@@ -75,14 +89,19 @@ func (m AListMounts) fileURL(winPath string) (string, bool) {
 }
 
 // joinMountRel appends a Windows-relative path to an AList mount.
-// mount is like "/doc1"; rel is like "subfolder1\111.txt".
-// Segments are NOT pre-escaped here — callers that need URL encoding (e.g. as a
-// query-parameter value) must apply url.QueryEscape to the full URL themselves,
-// which produces a single level of encoding.
-func joinMountRel(mount, rel string) string {
+// mount is like "/doc1"; rel is like "subfolder1\111.txt". When escape is true
+// each segment is percent-encoded via url.PathEscape.
+func joinMountRel(mount, rel string, escape bool) string {
 	rel = strings.TrimLeft(strings.ReplaceAll(rel, `\`, "/"), "/")
 	if rel == "" {
 		return mount
+	}
+	if escape {
+		parts := strings.Split(rel, "/")
+		for i, s := range parts {
+			parts[i] = url.PathEscape(s)
+		}
+		rel = strings.Join(parts, "/")
 	}
 	return strings.TrimRight(mount, "/") + "/" + rel
 }

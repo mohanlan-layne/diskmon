@@ -66,3 +66,40 @@ func TestAListMountsResolve(t *testing.T) {
 		})
 	}
 }
+
+// TestPreviewFileURL verifies the path is percent-encoded for the Base64 form
+// embedded in the kkFileView preview URL.
+func TestPreviewFileURL(t *testing.T) {
+	m := AListMounts{
+		Base:   "http://192.168.1.182:30244",
+		Mounts: []AListMount{{Prefix: `E:\filecenter`, Mount: "/filecenter"}},
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		wantURL string
+	}{
+		{
+			name:    "chinese filename is percent-encoded",
+			path:    `E:\filecenter\电气线边仓库位码.pdf`,
+			wantURL: "http://192.168.1.182:30244/d/filecenter/%E7%94%B5%E6%B0%94%E7%BA%BF%E8%BE%B9%E4%BB%93%E5%BA%93%E4%BD%8D%E7%A0%81.pdf",
+		},
+		{
+			name:    "spaces escaped",
+			path:    `E:\filecenter\my file.txt`,
+			wantURL: "http://192.168.1.182:30244/d/filecenter/my%20file.txt",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := m.previewFileURL(tt.path)
+			if !ok {
+				t.Fatalf("previewFileURL ok = false, want true")
+			}
+			if got != tt.wantURL {
+				t.Errorf("url = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}

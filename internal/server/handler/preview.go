@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,7 +46,11 @@ func (h *PreviewHandler) preview(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	fileURL, ok := mounts.fileURL(winPath)
+	// kkFileView 5.0 expects the file URL Base64-encoded, then URL-escaped:
+	//   onlinePreview?url=encodeURIComponent(base64(fileURL))
+	// The embedded file URL must have its path percent-encoded (Chinese → %E7…)
+	// so kkFileView's strict URL parser can read it after Base64 decoding.
+	fileURL, ok := mounts.previewFileURL(winPath)
 	if !ok {
 		jsonError(w, "该路径不在任何 AList 挂载目录下: "+winPath, http.StatusBadRequest)
 		return
@@ -56,6 +61,7 @@ func (h *PreviewHandler) preview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	previewURL := h.kkFileViewURL + "/onlinePreview?url=" + url.QueryEscape(fileURL)
+	encoded := base64.StdEncoding.EncodeToString([]byte(fileURL))
+	previewURL := h.kkFileViewURL + "/onlinePreview?url=" + url.QueryEscape(encoded)
 	http.Redirect(w, r, previewURL, http.StatusFound)
 }
