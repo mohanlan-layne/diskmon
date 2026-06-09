@@ -276,8 +276,9 @@ func (h *ServersHandler) registerAList(ctx context.Context, serverID string, loc
 func ensurePartition(ctx context.Context, db *sql.DB, serverID string) error {
 	pname := "p_" + safeName(serverID)
 	ddl := fmt.Sprintf(
-		"ALTER TABLE file_catalog ADD PARTITION (PARTITION %s VALUES IN (?))", pname)
-	_, err := db.ExecContext(ctx, ddl, serverID)
+		"ALTER TABLE file_catalog ADD PARTITION (PARTITION %s VALUES IN ('%s'))",
+		pname, serverID)
+	_, err := db.ExecContext(ctx, ddl)
 	if err != nil {
 		if me, ok := err.(*mysql.MySQLError); ok && me.Number == 1517 {
 			return nil // partition already exists

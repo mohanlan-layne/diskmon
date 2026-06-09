@@ -27,8 +27,9 @@ func New(db *sql.DB) *Catalog {
 func (c *Catalog) EnsurePartition(ctx context.Context, serverID string) error {
 	pname := partitionName(serverID)
 	ddl := fmt.Sprintf(
-		"ALTER TABLE file_catalog ADD PARTITION (PARTITION %s VALUES IN (?))", pname)
-	_, err := c.db.ExecContext(ctx, ddl, serverID)
+		"ALTER TABLE file_catalog ADD PARTITION (PARTITION %s VALUES IN ('%s'))",
+		pname, serverID)
+	_, err := c.db.ExecContext(ctx, ddl)
 	if err != nil {
 		if isPartitionExists(err) {
 			return nil // already exists, that's fine
