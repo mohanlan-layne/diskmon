@@ -102,7 +102,8 @@ func (m *Monitor) Run(ctx context.Context) error {
 	pendingOld := make(map[uint64]pendingRename)
 	pendingNew := make(map[uint64]pendingRename)
 
-	m.logger.Info("monitor started", "nextUSN", cp.NextUSN, "journalID", cp.JournalID)
+	m.logger.Info("monitor started", "nextUSN", cp.NextUSN, "journalID", cp.JournalID,
+		"include_dirs", m.filter.IncludeDirs, "extensions", m.filter.Extensions)
 
 	for {
 		select {
@@ -250,7 +251,11 @@ func (m *Monitor) processRecord(
 	}
 
 	eventType := MapEventType(rec.Reason)
-	if eventType == "" || path == "" {
+	if eventType == "" {
+		return nil
+	}
+	if path == "" {
+		m.logger.Info("path resolution failed, event dropped", "file", rec.FileName, "parentFRN", rec.ParentFRN, "frn", rec.FRN)
 		return nil
 	}
 
