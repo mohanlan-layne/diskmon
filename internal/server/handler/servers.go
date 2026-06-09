@@ -50,7 +50,57 @@ func (h *ServersHandler) Register(r chi.Router) {
 	r.Get("/api/servers/{id}", h.get)
 	r.Put("/api/servers/{id}", h.update)
 	r.Delete("/api/servers/{id}", h.delete)
+	r.Post("/api/servers/{id}/alist", h.configureAList)
 	r.Get("/api/alist/ping", h.alistPing)
+}
+
+// configureAList registers (or re-registers) AList Local storages for an
+// already-existing server and persists the resulting URLs. Used to add AList
+// to a server that was created without it.
+// POST /api/servers/{id}/alist  Body: {"alist_local_paths":{"E:":"/mnt/wzl-e"}}
+func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		LocalPaths map[string]string `json:"alist_local_paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if len(body.LocalPaths) == 0 {
+		jsonError(w, "alist_local_paths required", http.StatusBadRequest)
+		return
+	}
+	if h.alistCfg.URL == "" || h.alistCfg.Password == "" {
+		jsonError(w, "AList 未配置（server 端 alist.url / 密码为空）", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	urls, regErr := h.registerAList(ctx, id, body.LocalPaths)
+	if len(urls) == 0 {
+		msg := "unknown error"
+		if regErr != nil {
+			msg = regErr.Error()
+		}
+		jsonError(w, "AList 注册失败: "+msg, http.StatusBadGateway)
+		return
+	}
+
+	b, _ := json.Marshal(urls)
+	if _, err := h.db.ExecContext(ctx,
+		"UPDATE servers SET alist_urls=?, updated_at=NOW() WHERE server_id=?",
+		string(b), id); err != nil {
+		jsonError(w, "保存 alist_urls 失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := map[string]any{"alist_urls": urls}
+	if regErr != nil {
+		// Storage(s) created but a secondary step (e.g. guest enabling) failed.
+		resp["alist_warning"] = regErr.Error()
+	}
+	jsonOK(w, resp)
 }
 
 // alistPing tests AList connectivity and returns configured URL + login result.
@@ -264,11 +314,22 @@ func (h *ServersHandler) registerAList(ctx context.Context, serverID string, loc
 	}
 	urls := make(map[string]string, len(localPaths))
 	for volume, localPath := range localPaths {
+		// Normalise the key to "E:" form so preview lookups (keyed by the
+		// uppercase "<drive>:" prefix) resolve correctly.
+		volKey := strings.ToUpper(strings.TrimRight(volume, `\/`))
+		if len(volKey) == 1 {
+			volKey += ":"
+		}
 		mountPath := "/" + safeName(serverID) + "-" + volumeSafe(volume)
 		if _, err := ac.AddLocalStorage(ctx, mountPath, localPath); err != nil {
 			return urls, fmt.Errorf("alist add %s: %w", volume, err)
 		}
-		urls[volume] = alist.FileURL(h.alistCfg.URL, mountPath, "")
+		urls[volKey] = alist.FileURL(h.alistCfg.URL, mountPath, "")
+	}
+
+	// Make the new storages publicly browsable/downloadable without login.
+	if err := ac.EnsureGuestRead(ctx); err != nil {
+		return urls, fmt.Errorf("storages created but enabling guest access failed: %w", err)
 	}
 	return urls, nil
 }

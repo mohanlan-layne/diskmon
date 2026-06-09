@@ -92,6 +92,61 @@ func (c *Client) AddLocalStorage(ctx context.Context, mountPath, localRoot strin
 	return resp.Data.ID, nil
 }
 
+// EnsureGuestRead enables AList's built-in "guest" user so that the storages
+// can be browsed and downloaded without logging in. AList ships the guest user
+// disabled by default; this flips it on (read-only, base path "/") while
+// preserving every other field of the user object. It is idempotent: if guest
+// is already enabled it does nothing.
+func (c *Client) EnsureGuestRead(ctx context.Context) error {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"message"`
+		Data struct {
+			Content []map[string]any `json:"content"`
+		} `json:"data"`
+	}
+	if err := c.get(ctx, "/api/admin/user/list?page=1&per_page=100", &resp); err != nil {
+		return err
+	}
+	if resp.Code != 200 {
+		return fmt.Errorf("list users (code %d): %s", resp.Code, resp.Msg)
+	}
+
+	var guest map[string]any
+	for _, u := range resp.Data.Content {
+		if name, _ := u["username"].(string); name == "guest" {
+			guest = u
+			break
+		}
+	}
+	if guest == nil {
+		return fmt.Errorf("guest user not found in AList")
+	}
+
+	// Already enabled → nothing to do.
+	if dis, ok := guest["disabled"].(bool); ok && !dis {
+		return nil
+	}
+
+	guest["disabled"] = false
+	if bp, _ := guest["base_path"].(string); bp == "" {
+		guest["base_path"] = "/"
+	}
+
+	body, _ := json.Marshal(guest)
+	var up struct {
+		Code int    `json:"code"`
+		Msg  string `json:"message"`
+	}
+	if err := c.post(ctx, "/api/admin/user/update", body, &up); err != nil {
+		return err
+	}
+	if up.Code != 200 {
+		return fmt.Errorf("enable guest (code %d): %s", up.Code, up.Msg)
+	}
+	return nil
+}
+
 // StorageInfo holds minimal storage info from AList.
 type StorageInfo struct {
 	ID        int    `json:"id"`
