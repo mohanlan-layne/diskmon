@@ -1,47 +1,48 @@
 package handler
 
-import (
-	"archive/zip"
-	"bytes"
-	"context"
-	"os"
-	"testing"
-)
+import "testing"
 
-// TestAListZipperLive is an integration test against a live AList server. It is
-// skipped unless DISKMON_ALIST_BASE and DISKMON_ALIST_PATH are set, e.g.:
-//
-//	DISKMON_ALIST_BASE=http://192.168.1.182:30244 \
-//	DISKMON_ALIST_PATH=/filecenter \
-//	go test ./internal/server/handler -run TestAListZipperLive -v
-func TestAListZipperLive(t *testing.T) {
-	base := os.Getenv("DISKMON_ALIST_BASE")
-	path := os.Getenv("DISKMON_ALIST_PATH")
-	if base == "" || path == "" {
-		t.Skip("set DISKMON_ALIST_BASE and DISKMON_ALIST_PATH to run")
+func TestZipNameFor(t *testing.T) {
+	tests := []struct {
+		name string
+		p    string
+		fp   string
+		want string
+	}{
+		{"file selected directly", `E:\filecenter\a.pdf`, `E:\filecenter\a.pdf`, "a.pdf"},
+		{"file under dir", `E:\filecenter`, `E:\filecenter\电气.pdf`, "filecenter/电气.pdf"},
+		{"nested file under dir", `E:\filecenter`, `E:\filecenter\sub\b.txt`, "filecenter/sub/b.txt"},
+		{"case-insensitive exact", `E:\filecenter\a.pdf`, `e:\FILECENTER\a.pdf`, "a.pdf"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := zipNameFor(tt.p, tt.fp); got != tt.want {
+				t.Errorf("zipNameFor(%q,%q) = %q, want %q", tt.p, tt.fp, got, tt.want)
+			}
+		})
+	}
+}
 
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	z := newAListZipper(base)
-	if err := z.addToZip(context.Background(), zw, path, lastSegment(path)); err != nil {
-		t.Fatalf("addToZip: %v", err)
+func TestEscapeLike(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{`E:\filecenter\`, `E:\\filecenter\\`},
+		{`a%b_c`, `a\%b\_c`},
+		{`E:\dir\50%_done\`, `E:\\dir\\50\%\_done\\`},
 	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
+	for _, tt := range tests {
+		if got := escapeLike(tt.in); got != tt.want {
+			t.Errorf("escapeLike(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
+}
 
-	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	if err != nil {
-		t.Fatalf("open zip: %v", err)
+func TestDownloadURL(t *testing.T) {
+	z := newAListZipper("http://192.168.1.182:30244/")
+	got := z.downloadURL("/filecenter/电气线边仓库位码.pdf")
+	want := "http://192.168.1.182:30244/d/filecenter/%E7%94%B5%E6%B0%94%E7%BA%BF%E8%BE%B9%E4%BB%93%E5%BA%93%E4%BD%8D%E7%A0%81.pdf"
+	if got != want {
+		t.Errorf("downloadURL = %q, want %q", got, want)
 	}
-	if len(zr.File) == 0 {
-		t.Fatal("zip is empty")
-	}
-	var total uint64
-	for _, f := range zr.File {
-		total += f.UncompressedSize64
-		t.Logf("entry: %s (%d bytes)", f.Name, f.UncompressedSize64)
-	}
-	t.Logf("total %d entries, %d bytes", len(zr.File), total)
 }

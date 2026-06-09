@@ -2,6 +2,7 @@ package handler
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+// maxZipFiles caps how many files a single ZIP download may contain. Larger
+// selections are rejected before any bytes are written.
+const maxZipFiles = 100
 
 // DownloadHandler handles single-file download and ZIP pack endpoints.
 type DownloadHandler struct {
@@ -94,29 +99,41 @@ func (h *DownloadHandler) zipPack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="diskmon-pack.zip"`)
-
-	zw := zip.NewWriter(w)
-	defer zw.Close()
-
-	// AList-backed servers: the server pod has no local SMB mount, so stream the
-	// files from AList (anonymous list/get/download). resolveURLPath maps the
-	// Windows path to the AList virtual path; lastSegment names the archive's
-	// top-level entry (folder name for a directory, file name for a file).
+	// AList-backed servers: the server pod has no local SMB mount, so the file
+	// bytes are streamed from AList. The file list and count come from
+	// file_catalog, which lets us enforce the cap and reject up front, before
+	// any response body is written.
 	if mounts, err := loadAListMounts(r.Context(), h.db, body.ServerID); err == nil {
+		entries, over, err := h.collectAListEntries(r.Context(), body.ServerID, body.Paths, mounts)
+		if err != nil {
+			jsonError(w, "枚举待打包文件失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if over {
+			jsonError(w, fmt.Sprintf("打包文件数超过上限 %d，请缩小选择范围后再下载", maxZipFiles), http.StatusBadRequest)
+			return
+		}
+		if len(entries) == 0 {
+			jsonError(w, "没有可打包的文件", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="diskmon-pack.zip"`)
 		z := newAListZipper(mounts.Base)
-		for _, path := range body.Paths {
-			alistPath, ok := mounts.resolveURLPath(path, false)
-			if !ok {
-				continue
-			}
-			_ = z.addToZip(r.Context(), zw, alistPath, lastSegment(path))
+		zw := zip.NewWriter(w)
+		defer zw.Close()
+		for _, e := range entries {
+			_ = z.addFile(r.Context(), zw, e.alistPath, e.zipName)
 		}
 		return
 	}
 
 	// Fallback: local SMB mount on the server pod.
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="diskmon-pack.zip"`)
+	zw := zip.NewWriter(w)
+	defer zw.Close()
 	for _, path := range body.Paths {
 		localPath, err := h.resolveSMBPath(body.ServerID, path)
 		if err != nil {
@@ -124,6 +141,76 @@ func (h *DownloadHandler) zipPack(w http.ResponseWriter, r *http.Request) {
 		}
 		addPathToZip(zw, localPath)
 	}
+}
+
+// collectAListEntries enumerates, from file_catalog, the files to pack for the
+// given selection and resolves each to its AList virtual path. It returns
+// over=true as soon as the count would exceed maxZipFiles, so the caller can
+// reject without scanning everything. A selected path may be a file (matched
+// exactly) or a directory (matched by prefix); empty directories yield nothing.
+func (h *DownloadHandler) collectAListEntries(ctx context.Context, serverID string, paths []string, mounts AListMounts) (entries []zipEntry, over bool, err error) {
+	for _, p := range paths {
+		pNorm := strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`)
+		if pNorm == "" {
+			continue
+		}
+		likePat := escapeLike(pNorm+`\`) + "%"
+		// One extra row beyond the cap lets us detect overflow.
+		limit := maxZipFiles + 1 - len(entries)
+		rows, qerr := h.db.QueryContext(ctx,
+			`SELECT path FROM file_catalog
+			 WHERE server_id=? AND is_dir=0 AND (path=? OR path LIKE ? ESCAPE '\\')
+			 ORDER BY path LIMIT ?`,
+			serverID, pNorm, likePat, limit)
+		if qerr != nil {
+			return nil, false, qerr
+		}
+		for rows.Next() {
+			var fp string
+			if scanErr := rows.Scan(&fp); scanErr != nil {
+				rows.Close()
+				return nil, false, scanErr
+			}
+			alistPath, ok := mounts.resolveURLPath(fp, false)
+			if !ok {
+				continue
+			}
+			entries = append(entries, zipEntry{alistPath: alistPath, zipName: zipNameFor(pNorm, fp)})
+			if len(entries) > maxZipFiles {
+				rows.Close()
+				return entries, true, nil
+			}
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return nil, false, rowsErr
+		}
+		rows.Close()
+	}
+	return entries, false, nil
+}
+
+// zipNameFor computes the archive entry name for file fp selected via p. The
+// top-level name is p's last segment, with structure preserved beneath it:
+//
+//	p=E:\filecenter  fp=E:\filecenter\sub\a.pdf → filecenter/sub/a.pdf
+//	p=E:\x\a.pdf     fp=E:\x\a.pdf              → a.pdf
+func zipNameFor(p, fp string) string {
+	top := lastSegment(p)
+	if strings.EqualFold(fp, p) {
+		return top
+	}
+	if len(fp) > len(p)+1 {
+		rel := fp[len(p)+1:] // strip "p\"
+		return top + "/" + strings.ReplaceAll(rel, `\`, "/")
+	}
+	return top
+}
+
+// escapeLike escapes a string for use as a literal inside a MySQL LIKE pattern
+// (with the default '\' escape character).
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // addPathToZip adds a single file or, if localPath is a directory, every file
