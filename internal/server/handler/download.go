@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -92,13 +93,40 @@ func (h *DownloadHandler) zipPack(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		if err := addToZip(zw, localPath, filepath.Base(localPath)); err != nil {
-			continue
-		}
+		addPathToZip(zw, localPath)
 	}
 }
 
-func addToZip(zw *zip.Writer, localPath, zipName string) error {
+// addPathToZip adds a single file or, if localPath is a directory, every file
+// beneath it — preserving the directory structure under the folder's own name
+// (e.g. zipping "…/sub" yields entries "sub/a.txt", "sub/inner/b.txt").
+func addPathToZip(zw *zip.Writer, localPath string) {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return
+	}
+	if !info.IsDir() {
+		_ = addFileToZip(zw, localPath, filepath.Base(localPath))
+		return
+	}
+
+	// Walk the folder; entry names are relative to the folder's parent so the
+	// folder name itself becomes the top-level directory in the archive.
+	root := filepath.Dir(localPath)
+	_ = filepath.WalkDir(localPath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return nil
+		}
+		_ = addFileToZip(zw, p, filepath.ToSlash(rel))
+		return nil
+	})
+}
+
+func addFileToZip(zw *zip.Writer, localPath, zipName string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err

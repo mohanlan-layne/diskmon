@@ -402,7 +402,7 @@ function isPreviewable(ext) {
 // Windows 路径塞进 onclick 字符串导致转义错乱。
 function rowActions(f, i) {
   if (f.is_dir) {
-    return '<span style="color:#cbd5e1">—</span>';
+    return `<button class="btn sm" onclick="zipDir(${i})">📦 打包下载</button>`;
   }
   const ext = (f.ext || '').toLowerCase();
   let btns = `<button class="btn sm" onclick="dlFile(${i})">下载</button>`;
@@ -442,6 +442,14 @@ function zipSelected() {
   const paths = chks.map(c => currentFiles[+c.dataset.idx].path);
   postDownload('/api/files/zip',
     { server_id: currentServerID, paths: paths }, 'diskmon-pack.zip');
+}
+
+// zipDir 打包下载整个文件夹（后端递归、保留目录结构）。
+function zipDir(i) {
+  const f = currentFiles[i];
+  postDownload('/api/files/zip',
+    { server_id: currentServerID, paths: [f.path] },
+    (lastName(f.path) || 'folder') + '.zip');
 }
 
 function toggleAll(box) {
