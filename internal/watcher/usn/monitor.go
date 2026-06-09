@@ -159,6 +159,9 @@ func (m *Monitor) Run(ctx context.Context) error {
 		// Flush expired rename pairs before writing.
 		events = m.flushExpiredRenames(pendingOld, pendingNew, events)
 
+		// Collapse the burst of write records a single file save produces.
+		events = dedupWrites(events)
+
 		if len(events) > 0 {
 			if err := m.applyEvents(ctx, events); err != nil {
 				m.logger.Error("apply events failed", "err", err)
@@ -366,6 +369,37 @@ func (m *Monitor) flushExpiredRenames(
 		}
 	}
 	return events
+}
+
+// dedupWrites collapses redundant create/write events for the same path within
+// one read cycle. A single file save emits several USN data records
+// (DataExtend, DataOverwrite, DataTruncation, BasicInfoChange…), which would
+// otherwise become several identical upserts and log lines. A create already
+// upserts the row, so writes to a path that was also created this cycle are
+// dropped; otherwise only the first write per path is kept. Order is preserved
+// so remove/rename events still apply after the write that precedes them.
+func dedupWrites(events []model.ChangeEvent) []model.ChangeEvent {
+	if len(events) <= 1 {
+		return events
+	}
+	hasCreate := make(map[string]bool)
+	for _, e := range events {
+		if e.EventType == "create" {
+			hasCreate[e.Path] = true
+		}
+	}
+	emittedWrite := make(map[string]bool)
+	out := make([]model.ChangeEvent, 0, len(events))
+	for _, e := range events {
+		if e.EventType == "write" {
+			if hasCreate[e.Path] || emittedWrite[e.Path] {
+				continue
+			}
+			emittedWrite[e.Path] = true
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // applyEvents writes a batch of events to the catalog.

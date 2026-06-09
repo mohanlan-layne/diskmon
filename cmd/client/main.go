@@ -21,11 +21,13 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "time/tzdata" // embed IANA timezone database so loc=Asia/Shanghai works on Windows
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
 	"golang.org/x/sys/windows/svc/eventlog"
 
 	"diskmon/internal/catalog"
+	"diskmon/internal/checkpoint"
 	"diskmon/internal/clientapi"
 	"diskmon/internal/config"
 	"diskmon/internal/filter"
@@ -162,6 +164,13 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan bool, logger *slo
 	s := scanner.New(cfg.ServerID, cfg.Volumes, rules, cat, f, logger)
 
 	if rescan {
+		// Record each volume's current USN before scanning so the monitor
+		// resumes from the pre-scan position; changes made during the scan are
+		// then caught by the journal instead of falling into a gap between
+		// "scanned" and "monitoring started". Only seeds volumes without an
+		// existing checkpoint so a live checkpoint is never clobbered.
+		seedCheckpoints(cfg, logger)
+
 		logger.Info("starting full scan")
 		if err := s.Run(ctx); err != nil {
 			return fmt.Errorf("full scan: %w", err)
@@ -213,6 +222,47 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan bool, logger *slo
 
 	wg.Wait()
 	return nil
+}
+
+// seedCheckpoints captures the current journal position for each volume that
+// has no checkpoint yet, so a subsequent full scan plus monitor start does not
+// miss changes made during the scan. Best-effort: failures are logged and the
+// monitor falls back to starting from the current position when it runs.
+func seedCheckpoints(cfg *config.ClientConfig, logger *slog.Logger) {
+	for _, vol := range cfg.Volumes {
+		cp, err := checkpoint.Load(cfg.CheckpointPath, vol.Name)
+		if err != nil {
+			logger.Warn("seed checkpoint: load failed", "volume", vol.Name, "err", err)
+			continue
+		}
+		if cp.NextUSN != 0 {
+			continue // already have a position; don't clobber it
+		}
+
+		h, err := usn.OpenVolume(vol.Name)
+		if err != nil {
+			logger.Warn("seed checkpoint: open volume failed", "volume", vol.Name, "err", err)
+			continue
+		}
+		if err := usn.EnsureJournal(h, vol.JournalSize); err != nil {
+			logger.Warn("seed checkpoint: ensure journal failed", "volume", vol.Name, "err", err)
+			windows.CloseHandle(h)
+			continue
+		}
+		info, err := usn.QueryJournal(h)
+		windows.CloseHandle(h)
+		if err != nil {
+			logger.Warn("seed checkpoint: query journal failed", "volume", vol.Name, "err", err)
+			continue
+		}
+
+		seed := checkpoint.Data{JournalID: info.JournalID, NextUSN: info.NextUSN}
+		if err := checkpoint.Save(cfg.CheckpointPath, vol.Name, seed); err != nil {
+			logger.Warn("seed checkpoint: save failed", "volume", vol.Name, "err", err)
+			continue
+		}
+		logger.Info("seeded checkpoint before scan", "volume", vol.Name, "nextUSN", info.NextUSN)
+	}
 }
 
 type windowsService struct {
