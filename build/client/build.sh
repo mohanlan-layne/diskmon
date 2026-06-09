@@ -13,9 +13,13 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags="-s -w" \
   -o "$OUT/diskmon-client.exe" ./cmd/client
 
-echo "-> 复制配置模板和安装脚本 ..."
-cp scripts/config.template.yaml "$OUT/config.yaml"
-cp scripts/install-client.ps1   "$OUT/install-client.ps1"
+echo "-> 复制安装脚本 ..."
+cp scripts/install-client.ps1 "$OUT/install-client.ps1"
+
+# 只在 config.yaml 不存在时才从模板生成，已有的不覆盖
+if [ ! -f "$OUT/config.yaml" ]; then
+  cp scripts/config.template.yaml "$OUT/config.yaml"
+fi
 
 echo ""
 echo "==========================================================="
