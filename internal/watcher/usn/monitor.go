@@ -362,10 +362,13 @@ func (m *Monitor) applyEvents(ctx context.Context, events []model.ChangeEvent) e
 		var err error
 		switch evt.EventType {
 		case "create", "write":
+			m.logger.Info("file event", "type", evt.EventType, "path", evt.Path)
 			err = m.catalog.Upsert(ctx, entry)
 		case "remove":
+			m.logger.Info("file event", "type", evt.EventType, "path", evt.Path)
 			err = m.catalog.Delete(ctx, m.serverID, evt.Path)
 		case "rename":
+			m.logger.Info("file event", "type", "rename", "old", evt.OldPath, "new", evt.Path)
 			err = m.catalog.Rename(ctx, m.serverID, evt.OldPath, entry)
 		}
 		if err != nil {
