@@ -59,19 +59,12 @@ func (r *Resolver) Resolve(frn uint64) (string, bool) {
 	}
 
 	descriptor := fileIDDescriptor{
-		dwSize:  uint32(unsafe.Sizeof(fileIDDescriptor{})),
-		idType:  0, // FileIdType
-		fileID:  frn,
+		dwSize: uint32(unsafe.Sizeof(fileIDDescriptor{})), // must be 24
+		idType: 0,                                         // FileIdType (LARGE_INTEGER)
+		fileID: frn,
 	}
 
-	fileHandle, err := openFileByID(r.volumeHandle, &descriptor,
-		windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS,
-		0,
-	)
+	fileHandle, err := openFileByID(r.volumeHandle, &descriptor, windows.FILE_FLAG_BACKUP_SEMANTICS)
 	if err != nil {
 		return "", false
 	}
@@ -119,30 +112,23 @@ func getFinalPath(handle windows.Handle) (string, error) {
 	}
 }
 
-// fileIDDescriptor mirrors the Windows FILE_ID_DESCRIPTOR structure.
+// fileIDDescriptor mirrors the Windows FILE_ID_DESCRIPTOR structure (24 bytes).
+// Layout: dwSize(4) + Type(4) + union(16) where union is max(LARGE_INTEGER=8, GUID=16).
 type fileIDDescriptor struct {
-	dwSize uint32
-	idType uint32
-	fileID uint64
+	dwSize  uint32
+	idType  uint32
+	fileID  uint64
+	_       [8]byte // padding: union must be 16 bytes to match Windows struct size
 }
 
 // openFileByID wraps the OpenFileById Windows API.
-func openFileByID(
-	volumeHandle windows.Handle,
-	fileID *fileIDDescriptor,
-	desiredAccess uint32,
-	shareMode uint32,
-	securityAttrs *windows.SecurityAttributes,
-	creationDisposition uint32,
-	flagsAndAttrs uint32,
-	templateFile windows.Handle,
-) (windows.Handle, error) {
+func openFileByID(volumeHandle windows.Handle, fileID *fileIDDescriptor, flagsAndAttrs uint32) (windows.Handle, error) {
 	r, _, err := procOpenFileById.Call(
 		uintptr(volumeHandle),
 		uintptr(unsafe.Pointer(fileID)),
-		uintptr(desiredAccess),
-		uintptr(shareMode),
-		uintptr(unsafe.Pointer(securityAttrs)),
+		uintptr(windows.FILE_READ_ATTRIBUTES),
+		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
+		0, // security attrs
 		uintptr(flagsAndAttrs),
 	)
 	if windows.Handle(r) == windows.InvalidHandle {
