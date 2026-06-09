@@ -162,8 +162,8 @@ func (m *Monitor) Run(ctx context.Context) error {
 		// Flush expired rename pairs before writing.
 		events = m.flushExpiredRenames(pendingOld, pendingNew, events)
 
-		// Collapse the burst of write records a single file save produces.
-		events = dedupWrites(events)
+		// Collapse the burst of records a single file operation produces.
+		events = dedupEvents(events)
 
 		if len(events) > 0 {
 			if err := m.applyEvents(ctx, events); err != nil {
@@ -374,14 +374,19 @@ func (m *Monitor) flushExpiredRenames(
 	return events
 }
 
-// dedupWrites collapses redundant create/write events for the same path within
-// one read cycle. A single file save emits several USN data records
-// (DataExtend, DataOverwrite, DataTruncation, BasicInfoChange…), which would
-// otherwise become several identical upserts and log lines. A create already
-// upserts the row, so writes to a path that was also created this cycle are
-// dropped; otherwise only the first write per path is kept. Order is preserved
-// so remove/rename events still apply after the write that precedes them.
-func dedupWrites(events []model.ChangeEvent) []model.ChangeEvent {
+// dedupEvents collapses the burst of records a single file operation produces
+// within one read cycle. Creating or saving a file emits several USN records
+// (FileCreate, DataExtend, DataOverwrite, DataTruncation, BasicInfoChange,
+// Close…), several of which carry the same reason bit and would otherwise
+// become identical upserts and log lines. Rules:
+//   - at most one event per (type, path) is kept, in first-seen order;
+//   - a write to a path that was also created in this cycle is dropped (the
+//     create already upserts the row).
+//
+// Order is preserved so a later remove/rename still applies after the
+// create/write that precedes it (e.g. a temp file created and deleted in the
+// same cycle yields create then remove).
+func dedupEvents(events []model.ChangeEvent) []model.ChangeEvent {
 	if len(events) <= 1 {
 		return events
 	}
@@ -391,15 +396,17 @@ func dedupWrites(events []model.ChangeEvent) []model.ChangeEvent {
 			hasCreate[e.Path] = true
 		}
 	}
-	emittedWrite := make(map[string]bool)
+	seen := make(map[string]bool)
 	out := make([]model.ChangeEvent, 0, len(events))
 	for _, e := range events {
-		if e.EventType == "write" {
-			if hasCreate[e.Path] || emittedWrite[e.Path] {
-				continue
-			}
-			emittedWrite[e.Path] = true
+		if e.EventType == "write" && hasCreate[e.Path] {
+			continue // create already covers this path
 		}
+		key := e.EventType + "\x00" + e.OldPath + "\x00" + e.Path
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		out = append(out, e)
 	}
 	return out
