@@ -330,23 +330,30 @@ func (m *Monitor) flushExpiredRenames(
 	for frn, r := range pendingOld {
 		if now.Sub(r.timestamp) > m.renameWin {
 			delete(pendingOld, frn)
-			events = append(events, model.ChangeEvent{
+			evt := model.ChangeEvent{
 				EventType:  "remove",
 				Path:       r.path,
 				Volume:     m.volume.Name,
 				OccurredAt: r.timestamp,
-			})
+			}
+			if m.filter.Match(evt) {
+				events = append(events, evt)
+			}
 		}
 	}
 	for frn, r := range pendingNew {
 		if now.Sub(r.timestamp) > m.renameWin {
 			delete(pendingNew, frn)
-			events = append(events, model.ChangeEvent{
+			evt := model.ChangeEvent{
 				EventType:  "create",
 				Path:       r.path,
+				Ext:        strings.ToLower(filepath.Ext(r.path)),
 				Volume:     m.volume.Name,
 				OccurredAt: r.timestamp,
-			})
+			}
+			if m.filter.Match(evt) {
+				events = append(events, evt)
+			}
 		}
 	}
 	return events
