@@ -103,7 +103,13 @@ func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	mounts := AListMounts{Base: strings.TrimRight(h.alistCfg.URL, "/")}
+	// File links must be browser-reachable: prefer the public URL, fall back to
+	// the internal one. Admin API calls above still use the internal URL.
+	base := h.alistCfg.PublicURL
+	if base == "" {
+		base = h.alistCfg.URL
+	}
+	mounts := AListMounts{Base: strings.TrimRight(base, "/")}
 	for _, dir := range body.Dirs {
 		rel, ok := splitByPrefix(dir, body.SmbRoot)
 		if !ok {

@@ -73,7 +73,11 @@ func main() {
 	dl := handler.NewDownloadHandler(db, cfg.SmbMounts)
 	dl.Register(r)
 	handler.NewTransformHandler(dl).Register(r)
-	handler.NewPreviewHandler(db, cfg.KkFileViewURL).Register(r)
+	kkURL := cfg.KkFileViewPublicURL // browser-reachable; falls back to internal
+	if kkURL == "" {
+		kkURL = cfg.KkFileViewURL
+	}
+	handler.NewPreviewHandler(db, kkURL).Register(r)
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,

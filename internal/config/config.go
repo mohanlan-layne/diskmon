@@ -36,15 +36,22 @@ type ServerConfig struct {
 	Listen        string                       `yaml:"listen"`
 	SmbMounts     map[string]map[string]string `yaml:"smb_mounts"` // server_id → volume → local mount path
 	KkFileViewURL string                       `yaml:"kkfileview_url"`
-	AList         AListConfig                  `yaml:"alist"`
+	// KkFileViewPublicURL is the browser-reachable kkFileView address used for
+	// preview redirects (the internal kkfileview_url is not resolvable from a
+	// user's browser). Falls back to KkFileViewURL when empty.
+	KkFileViewPublicURL string      `yaml:"kkfileview_public_url"`
+	AList               AListConfig `yaml:"alist"`
 }
 
 // AListConfig holds connection info for the AList admin API.
 // Password can be overridden by the ALIST_PASSWORD environment variable.
 type AListConfig struct {
-	URL      string `yaml:"url"`      // e.g. http://alist.middleware.svc.cluster.local:5244
+	URL      string `yaml:"url"`      // internal admin/API URL, e.g. http://alist.middleware.svc.cluster.local:5244
 	Username string `yaml:"username"` // AList admin username, default "admin"
 	Password string `yaml:"password"` // injected from env ALIST_PASSWORD in k8s
+	// PublicURL is the browser-reachable AList address (NodePort/ingress) used
+	// as the base for file download/preview links. Falls back to URL when empty.
+	PublicURL string `yaml:"public_url"`
 }
 
 // PostgresConfig holds the database connection string.
