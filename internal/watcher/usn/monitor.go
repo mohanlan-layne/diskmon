@@ -147,7 +147,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 		}
 
 		// Flush expired rename pairs before writing.
-		m.flushExpiredRenames(ctx, pendingOld, pendingNew, events)
+		events = m.flushExpiredRenames(pendingOld, pendingNew, events)
 
 		if len(events) > 0 {
 			if err := m.applyEvents(ctx, events); err != nil {
@@ -225,9 +225,23 @@ func (m *Monitor) processRecord(
 	}
 
 	if IsRenameNew(rec.Reason) {
-		if path != "" {
-			pendingNew[rec.FRN] = pendingRename{path: path, timestamp: occuredAt}
+		if path == "" {
+			// Can't resolve new path — treat pending old path as a remove.
+			if old, ok := pendingOld[rec.FRN]; ok {
+				delete(pendingOld, rec.FRN)
+				return []model.ChangeEvent{{
+					EventType:  "remove",
+					Path:       old.path,
+					IsDir:      isDir,
+					Volume:     m.volume.Name,
+					FRN:        rec.FRN,
+					USN:        rec.USN,
+					OccurredAt: occuredAt,
+				}}
+			}
+			return nil
 		}
+		pendingNew[rec.FRN] = pendingRename{path: path, timestamp: occuredAt}
 		// Try to pair immediately.
 		if old, ok := pendingOld[rec.FRN]; ok {
 			delete(pendingOld, rec.FRN)
@@ -300,12 +314,11 @@ func (m *Monitor) buildRenameEvents(rec RawRecord, oldPath, newPath string, isDi
 }
 
 // flushExpiredRenames converts unpaired rename pairs that exceeded the rename window
-// into create/remove events and appends them to events.
+// into create/remove events and returns the extended events slice.
 func (m *Monitor) flushExpiredRenames(
-	ctx context.Context,
 	pendingOld, pendingNew map[uint64]pendingRename,
 	events []model.ChangeEvent,
-) {
+) []model.ChangeEvent {
 	now := time.Now()
 	for frn, r := range pendingOld {
 		if now.Sub(r.timestamp) > m.renameWin {
@@ -329,6 +342,7 @@ func (m *Monitor) flushExpiredRenames(
 			})
 		}
 	}
+	return events
 }
 
 // applyEvents writes a batch of events to the catalog.
