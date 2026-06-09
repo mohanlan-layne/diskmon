@@ -129,7 +129,11 @@ func (m *Monitor) Run(ctx context.Context) error {
 			cp.JournalID = journal.JournalID
 		}
 		if cp.NextUSN == 0 {
-			cp.NextUSN = journal.FirstUSN
+			// Fresh start: begin at the journal's current end so we only watch
+			// changes from now on. Existing files are captured by the full scan.
+			// Starting from FirstUSN would replay the entire historical journal.
+			cp.NextUSN = journal.NextUSN
+			m.logger.Info("no checkpoint, starting from current journal position", "nextUSN", cp.NextUSN)
 		}
 
 		// Read up to 6 consecutive batches per poll cycle (~250 ms of records).
