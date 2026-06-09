@@ -111,6 +111,11 @@ func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		mountPath := "/" + lastSegment(dir)
+		// Idempotent: drop any existing storage at this mount before recreating.
+		if _, err := ac.RemoveStorageByMount(ctx, mountPath); err != nil {
+			jsonError(w, fmt.Sprintf("清理旧挂载 %s 失败: %v", mountPath, err), http.StatusBadGateway)
+			return
+		}
 		if _, err := ac.AddSMBStorage(ctx, mountPath, smbHost, body.SmbShare, rel, smbUser, smbPass); err != nil {
 			jsonError(w, fmt.Sprintf("AList 挂载 %s 失败: %v", dir, err), http.StatusBadGateway)
 			return

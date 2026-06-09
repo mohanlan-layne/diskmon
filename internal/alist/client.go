@@ -160,7 +160,12 @@ func (c *Client) AddSMBStorage(ctx context.Context, mountPath, address, shareNam
 	if !strings.Contains(address, ":") {
 		address += ":445" // AList SMB driver net.Dial needs an explicit port
 	}
-	root := "/" + strings.Trim(strings.ReplaceAll(rootPath, `\`, "/"), "/")
+	// Path within the share, relative — go-smb2 rejects a leading separator.
+	// AList's SMB driver uses DefaultRoot "." for the share root.
+	root := strings.Trim(strings.ReplaceAll(rootPath, `\`, "/"), "/")
+	if root == "" {
+		root = "."
+	}
 
 	addition, _ := json.Marshal(map[string]any{
 		"address":          address,
@@ -236,6 +241,25 @@ func (c *Client) DeleteStorage(ctx context.Context, id int) error {
 		return fmt.Errorf("delete storage (code %d): %s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// RemoveStorageByMount deletes any storage whose mount_path matches, making
+// (re)registration idempotent. Returns the number removed.
+func (c *Client) RemoveStorageByMount(ctx context.Context, mountPath string) (int, error) {
+	storages, err := c.ListStorages(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, s := range storages {
+		if s.MountPath == mountPath {
+			if err := c.DeleteStorage(ctx, s.ID); err != nil {
+				return n, err
+			}
+			n++
+		}
+	}
+	return n, nil
 }
 
 // FileURL builds the AList direct-download URL for a file.
