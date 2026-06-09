@@ -173,14 +173,8 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     <div class="form-row"><label>SMB 密码</label><input id="a-pass" type="password"></div>
     <div class="form-row"><label>Client 管理 API 地址</label><input id="a-api" placeholder="192.168.1.10:19090"></div>
     <div class="form-row"><label>Client API Token（可空）</label><input id="a-token" placeholder="留空则不鉴权"></div>
-    <div class="form-row" style="align-items:flex-start">
-      <label>AList 挂载路径<br><span style="font-size:11px;color:#9ca3af;font-weight:400">可空</span></label>
-      <div style="flex:1">
-        <textarea id="a-alist" rows="2" style="width:100%;font-family:monospace;font-size:12px"
-          placeholder="每行一个卷=AList pod 内路径，如：&#10;E:=/mnt/wzl-e"></textarea>
-        <div style="font-size:11px;color:#9ca3af;margin-top:3px">填写后会自动在 AList 建存储并开放 guest 访问（用于预览）。留空则跳过。</div>
-      </div>
-    </div>
+    <div class="form-row"><label>SMB 根目录<br><span style="font-size:11px;color:#9ca3af;font-weight:400">可空</span></label><input id="a-sysroot" placeholder="如 E:\smb（共享对应的绝对路径）"></div>
+    <div style="font-size:11px;color:#9ca3af;margin:-4px 0 8px 130px">AList 挂载在添加后用「配置AList」按钮单独设置。</div>
     <div class="form-actions">
       <button class="btn grey" onclick="closeModal('modal-add')">取消</button>
       <button class="btn" onclick="submitAddServer()">添加</button>
@@ -258,27 +252,30 @@ async function loadServers() {
   serversCache.forEach(s => checkHealth(s.server_id));
 }
 
-// configAList 给已存在的服务器补 AList 存储（含开放 guest 访问）。
+// configAList 给服务器配置 AList SMB 挂载：把每个监听目录挂成独立 AList 存储，
+// 只暴露叶子名（如 /doc1），隐藏真实系统路径。
 async function configAList(id) {
-  const raw = prompt(
-    'AList 挂载路径（每行「卷=AList pod 内路径」）\n例如：\nE:=/mnt/' + id, '');
-  if (raw === null) return;
-  const paths = {};
-  for (const line of raw.split('\n')) {
-    const s = line.trim();
-    if (!s) continue;
-    const eq = s.indexOf('=');
-    if (eq < 1) { alert('格式错误，应为「卷=路径」：' + s); return; }
-    paths[s.slice(0, eq).trim()] = s.slice(eq + 1).trim();
-  }
-  if (!Object.keys(paths).length) { alert('未填写任何路径'); return; }
+  const share = prompt('SMB 共享名（AList 连 \\\\host\\<共享名>）\n例如：smb', '');
+  if (share === null) return;
+  if (!share.trim()) { alert('共享名必填'); return; }
 
-  const { ok, data } = await api('POST', `/api/servers/${id}/alist`, { alist_local_paths: paths });
+  const root = prompt('SMB 根的绝对路径（共享对应的 Windows 路径）\n例如：E:\\smb', '');
+  if (root === null) return;
+  if (!root.trim()) { alert('根路径必填'); return; }
+
+  const dirsRaw = prompt(
+    '要在 AList 暴露的监听目录（每行一个绝对路径，须在根之下）\n例如：\nE:\\smb\\folder1\\doc1\nE:\\smb\\folder1\\doc2', '');
+  if (dirsRaw === null) return;
+  const dirs = dirsRaw.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!dirs.length) { alert('至少填一个目录'); return; }
+
+  const { ok, data } = await api('POST', `/api/servers/${id}/alist`,
+    { smb_share: share.trim(), smb_root: root.trim(), dirs: dirs });
   if (ok) {
     let msg = 'AList 配置成功';
     if (data && data.alist_warning) msg += '\n注意：' + data.alist_warning;
-    if (data && data.alist_urls) msg += '\n\n生成的链接：\n' +
-      Object.entries(data.alist_urls).map(([k, v]) => k + ' → ' + v).join('\n');
+    if (data && data.mounts) msg += '\n\n已挂载：\n' +
+      data.mounts.map(m => m.prefix + ' → ' + m.mount).join('\n');
     alert(msg);
     loadServers();
   } else {
@@ -565,27 +562,13 @@ async function submitAddServer() {
     smb_pass: document.getElementById('a-pass').value,
     api_addr: document.getElementById('a-api').value.trim(),
     api_token: document.getElementById('a-token').value.trim(),
+    sys_root: document.getElementById('a-sysroot').value.trim(),
   };
-
-  // 解析 AList 挂载路径：每行 "卷=pod内路径"，如 E:=/mnt/wzl-e
-  const alistRaw = document.getElementById('a-alist').value.trim();
-  if (alistRaw) {
-    const paths = {};
-    for (const line of alistRaw.split('\n')) {
-      const s = line.trim();
-      if (!s) continue;
-      const eq = s.indexOf('=');
-      if (eq < 1) { showAlert('add-alert', 'AList 路径格式应为「卷=路径」：' + s, true); return; }
-      paths[s.slice(0, eq).trim()] = s.slice(eq + 1).trim();
-    }
-    if (Object.keys(paths).length) body.alist_local_paths = paths;
-  }
 
   const { ok, data } = await api('POST', '/api/servers', body);
   if (ok) {
     closeModal('modal-add');
     loadServers();
-    if (data && data.alist_warning) alert('服务器已添加，但 AList 注册有问题：\n' + data.alist_warning);
   } else {
     showAlert('add-alert', (data && data.error) || '添加失败', true);
   }

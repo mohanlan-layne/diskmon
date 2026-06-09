@@ -147,6 +147,56 @@ func (c *Client) EnsureGuestRead(ctx context.Context) error {
 	return nil
 }
 
+// AddSMBStorage creates an AList SMB-driver storage. AList connects to the SMB
+// server itself (no CSI mount needed); the patched image supports Windows
+// domain accounts via a DOMAIN\user username.
+//
+//	mountPath  – virtual path shown in AList, e.g. "/doc1" (hides the real tree)
+//	address    – SMB server, host or host:port (445 is appended if absent)
+//	shareName  – the SMB share name, e.g. "smb" for \\host\smb
+//	rootPath   – path within the share to expose as the root, e.g. "folder1/doc1"
+//	username   – may include a domain, e.g. "EASTWINSZ\\someuser"
+func (c *Client) AddSMBStorage(ctx context.Context, mountPath, address, shareName, rootPath, username, password string) (int, error) {
+	if !strings.Contains(address, ":") {
+		address += ":445" // AList SMB driver net.Dial needs an explicit port
+	}
+	root := "/" + strings.Trim(strings.ReplaceAll(rootPath, `\`, "/"), "/")
+
+	addition, _ := json.Marshal(map[string]any{
+		"address":          address,
+		"username":         username,
+		"password":         password,
+		"share_name":       shareName,
+		"root_folder_path": root,
+	})
+	payload := map[string]any{
+		"mount_path":       mountPath,
+		"driver":           "SMB",
+		"order":            0,
+		"remark":           "",
+		"cache_expiration": 30,
+		"web_proxy":        false,
+		"enable_sign":      false,
+		"addition":         string(addition),
+	}
+	body, _ := json.Marshal(payload)
+
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"message"`
+		Data struct {
+			ID int `json:"id"`
+		} `json:"data"`
+	}
+	if err := c.post(ctx, "/api/admin/storage/create", body, &resp); err != nil {
+		return 0, err
+	}
+	if resp.Code != 200 {
+		return 0, fmt.Errorf("add SMB storage failed (code %d): %s", resp.Code, resp.Msg)
+	}
+	return resp.Data.ID, nil
+}
+
 // StorageInfo holds minimal storage info from AList.
 type StorageInfo struct {
 	ID        int    `json:"id"`

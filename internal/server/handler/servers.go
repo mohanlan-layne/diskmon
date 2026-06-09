@@ -54,21 +54,27 @@ func (h *ServersHandler) Register(r chi.Router) {
 	r.Get("/api/alist/ping", h.alistPing)
 }
 
-// configureAList registers (or re-registers) AList Local storages for an
-// already-existing server and persists the resulting URLs. Used to add AList
-// to a server that was created without it.
-// POST /api/servers/{id}/alist  Body: {"alist_local_paths":{"E:":"/mnt/wzl-e"}}
+// configureAList mounts each monitored directory of a server into AList as a
+// separate SMB-driver storage, exposing only the leaf name (e.g. /doc1) so the
+// real system path (E:\smb\folder1) stays hidden. The resulting prefix→mount
+// map is saved to servers.alist_urls for preview/download resolution.
+//
+// POST /api/servers/{id}/alist
+// Body: {"smb_share":"smb","smb_root":"E:\\smb",
+//        "dirs":["E:\\smb\\folder1\\doc1","E:\\smb\\folder1\\doc2"]}
 func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var body struct {
-		LocalPaths map[string]string `json:"alist_local_paths"`
+		SmbShare string   `json:"smb_share"`
+		SmbRoot  string   `json:"smb_root"`
+		Dirs     []string `json:"dirs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	if len(body.LocalPaths) == 0 {
-		jsonError(w, "alist_local_paths required", http.StatusBadRequest)
+	if body.SmbShare == "" || body.SmbRoot == "" || len(body.Dirs) == 0 {
+		jsonError(w, "smb_share、smb_root、dirs 均必填", http.StatusBadRequest)
 		return
 	}
 	if h.alistCfg.URL == "" || h.alistCfg.Password == "" {
@@ -77,30 +83,68 @@ func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
-	urls, regErr := h.registerAList(ctx, id, body.LocalPaths)
-	if len(urls) == 0 {
-		msg := "unknown error"
-		if regErr != nil {
-			msg = regErr.Error()
-		}
-		jsonError(w, "AList 注册失败: "+msg, http.StatusBadGateway)
+
+	// SMB credentials come from the server record.
+	var smbHost, smbUser, smbPass string
+	if err := h.db.QueryRowContext(ctx,
+		"SELECT smb_host, smb_user, COALESCE(smb_pass,'') FROM servers WHERE server_id=?", id,
+	).Scan(&smbHost, &smbUser, &smbPass); err != nil {
+		jsonError(w, "server 不存在或无 SMB 凭据", http.StatusBadRequest)
+		return
+	}
+	if smbHost == "" {
+		jsonError(w, "该 server 未配置 SMB 主机", http.StatusBadRequest)
 		return
 	}
 
-	b, _ := json.Marshal(urls)
+	ac, err := alist.New(h.alistCfg.URL, h.alistCfg.Username, h.alistCfg.Password)
+	if err != nil {
+		jsonError(w, "连接 AList 失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	mounts := AListMounts{Base: strings.TrimRight(h.alistCfg.URL, "/")}
+	for _, dir := range body.Dirs {
+		rel, ok := splitByPrefix(dir, body.SmbRoot)
+		if !ok {
+			jsonError(w, fmt.Sprintf("目录 %s 不在 SMB 根 %s 之下", dir, body.SmbRoot), http.StatusBadRequest)
+			return
+		}
+		mountPath := "/" + lastSegment(dir)
+		if _, err := ac.AddSMBStorage(ctx, mountPath, smbHost, body.SmbShare, rel, smbUser, smbPass); err != nil {
+			jsonError(w, fmt.Sprintf("AList 挂载 %s 失败: %v", dir, err), http.StatusBadGateway)
+			return
+		}
+		mounts.Mounts = append(mounts.Mounts, AListMount{
+			Prefix: strings.ReplaceAll(strings.TrimRight(dir, `\/`), "/", `\`),
+			Mount:  mountPath,
+		})
+	}
+
+	guestErr := ac.EnsureGuestRead(ctx)
+
+	stored, _ := marshalAListMounts(mounts)
 	if _, err := h.db.ExecContext(ctx,
-		"UPDATE servers SET alist_urls=?, updated_at=NOW() WHERE server_id=?",
-		string(b), id); err != nil {
+		"UPDATE servers SET alist_urls=?, sys_root=?, updated_at=NOW() WHERE server_id=?",
+		stored, body.SmbRoot, id); err != nil {
 		jsonError(w, "保存 alist_urls 失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	resp := map[string]any{"alist_urls": urls}
-	if regErr != nil {
-		// Storage(s) created but a secondary step (e.g. guest enabling) failed.
-		resp["alist_warning"] = regErr.Error()
+	resp := map[string]any{"mounts": mounts.Mounts}
+	if guestErr != nil {
+		resp["alist_warning"] = "存储已建，但开启 guest 访问失败: " + guestErr.Error()
 	}
 	jsonOK(w, resp)
+}
+
+// lastSegment returns the final path component of a Windows/Unix path.
+func lastSegment(p string) string {
+	p = strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`)
+	if i := strings.LastIndex(p, `\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // alistPing tests AList connectivity and returns configured URL + login result.
@@ -174,16 +218,15 @@ func (h *ServersHandler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ServerID        string            `json:"server_id"`
-		Name            string            `json:"name"`
-		SmbHost         string            `json:"smb_host"`
-		SmbUser         string            `json:"smb_user"`
-		SmbPass         string            `json:"smb_pass"`
-		SysRoot         string            `json:"sys_root"`
-		Volumes         json.RawMessage   `json:"volumes"`
-		APIAddr         string            `json:"api_addr"`
-		APIToken        string            `json:"api_token"`
-		AListLocalPaths map[string]string `json:"alist_local_paths"` // volume → path in AList pod
+		ServerID string          `json:"server_id"`
+		Name     string          `json:"name"`
+		SmbHost  string          `json:"smb_host"`
+		SmbUser  string          `json:"smb_user"`
+		SmbPass  string          `json:"smb_pass"`
+		SysRoot  string          `json:"sys_root"`
+		Volumes  json.RawMessage `json:"volumes"`
+		APIAddr  string          `json:"api_addr"`
+		APIToken string          `json:"api_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -196,21 +239,14 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	alistURLs, alistErr := h.registerAList(ctx, body.ServerID, body.AListLocalPaths)
-
-	var alistURLsJSON any
-	if len(alistURLs) > 0 {
-		b, _ := json.Marshal(alistURLs)
-		alistURLsJSON = string(b)
-	}
-
+	// AList storages are configured separately via POST /api/servers/{id}/alist.
 	res, err := h.db.ExecContext(ctx, `
 		INSERT INTO servers (server_id, name, smb_host, smb_user, smb_pass, sys_root,
-		                     volumes, api_addr, api_token, alist_urls)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		                     volumes, api_addr, api_token)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
 		body.ServerID, body.Name, body.SmbHost, body.SmbUser, body.SmbPass,
 		body.SysRoot, nullJSON(body.Volumes),
-		nullStr(body.APIAddr), nullStr(body.APIToken), alistURLsJSON,
+		nullStr(body.APIAddr), nullStr(body.APIToken),
 	)
 	if err != nil {
 		jsonError(w, "insert failed: "+err.Error(), http.StatusInternalServerError)
@@ -222,15 +258,8 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 		_ = err
 	}
 
-	resp := map[string]any{"id": id}
-	if alistErr != nil {
-		resp["alist_warning"] = fmt.Sprintf("AList registration skipped: %v", alistErr)
-	}
-	if len(alistURLs) > 0 {
-		resp["alist_urls"] = alistURLs
-	}
 	w.WriteHeader(http.StatusCreated)
-	jsonOK(w, resp)
+	jsonOK(w, map[string]any{"id": id})
 }
 
 func (h *ServersHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -303,37 +332,6 @@ func (h *ServersHandler) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// registerAList calls the AList API to create Local storages for each volume.
-func (h *ServersHandler) registerAList(ctx context.Context, serverID string, localPaths map[string]string) (map[string]string, error) {
-	if len(localPaths) == 0 || h.alistCfg.URL == "" || h.alistCfg.Password == "" {
-		return nil, nil
-	}
-	ac, err := alist.New(h.alistCfg.URL, h.alistCfg.Username, h.alistCfg.Password)
-	if err != nil {
-		return nil, fmt.Errorf("connect alist: %w", err)
-	}
-	urls := make(map[string]string, len(localPaths))
-	for volume, localPath := range localPaths {
-		// Normalise the key to "E:" form so preview lookups (keyed by the
-		// uppercase "<drive>:" prefix) resolve correctly.
-		volKey := strings.ToUpper(strings.TrimRight(volume, `\/`))
-		if len(volKey) == 1 {
-			volKey += ":"
-		}
-		mountPath := "/" + safeName(serverID) + "-" + volumeSafe(volume)
-		if _, err := ac.AddLocalStorage(ctx, mountPath, localPath); err != nil {
-			return urls, fmt.Errorf("alist add %s: %w", volume, err)
-		}
-		urls[volKey] = alist.FileURL(h.alistCfg.URL, mountPath, "")
-	}
-
-	// Make the new storages publicly browsable/downloadable without login.
-	if err := ac.EnsureGuestRead(ctx); err != nil {
-		return urls, fmt.Errorf("storages created but enabling guest access failed: %w", err)
-	}
-	return urls, nil
-}
-
 func ensurePartition(ctx context.Context, db *sql.DB, serverID string) error {
 	pname := "p_" + safeName(serverID)
 	ddl := fmt.Sprintf(
@@ -354,8 +352,4 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
-}
-
-func volumeSafe(v string) string {
-	return strings.ToLower(strings.ReplaceAll(v, ":", ""))
 }

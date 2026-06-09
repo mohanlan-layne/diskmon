@@ -2,6 +2,7 @@ package handler
 
 import (
 	"archive/zip"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,14 +17,15 @@ import (
 
 // DownloadHandler handles single-file download and ZIP pack endpoints.
 type DownloadHandler struct {
+	db *sql.DB
 	// smbMounts: server_id → volume → local mount path
 	// e.g. "server-A" → "D:" → "/mnt/server-a-d"
 	smbMounts map[string]map[string]string
 }
 
 // NewDownloadHandler creates a DownloadHandler.
-func NewDownloadHandler(smbMounts map[string]map[string]string) *DownloadHandler {
-	return &DownloadHandler{smbMounts: smbMounts}
+func NewDownloadHandler(db *sql.DB, smbMounts map[string]map[string]string) *DownloadHandler {
+	return &DownloadHandler{db: db, smbMounts: smbMounts}
 }
 
 // Register mounts download routes.
@@ -32,14 +34,24 @@ func (h *DownloadHandler) Register(r chi.Router) {
 	r.Post("/api/files/zip", h.zipPack)
 }
 
-// single streams a single file from the SMB mount.
-// GET /api/files/dl?server_id=server-A&path=D:\drawings\1234\file.pdf
+// single serves a single file. If the server has AList mounts configured it
+// redirects to the AList direct-download link (hiding the system path); other-
+// wise it streams the file from the server pod's SMB mount.
+// GET /api/files/dl?server_id=server-A&path=E:\smb\folder1\doc1\sub\file.pdf
 func (h *DownloadHandler) single(w http.ResponseWriter, r *http.Request) {
 	serverID := r.URL.Query().Get("server_id")
 	path := r.URL.Query().Get("path")
 	if serverID == "" || path == "" {
 		jsonError(w, "server_id and path required", http.StatusBadRequest)
 		return
+	}
+
+	// Prefer AList direct download when configured.
+	if mounts, err := loadAListMounts(r.Context(), h.db, serverID); err == nil {
+		if dlURL, ok := mounts.fileURL(path); ok {
+			http.Redirect(w, r, dlURL, http.StatusFound)
+			return
+		}
 	}
 
 	localPath, err := h.resolveSMBPath(serverID, path)

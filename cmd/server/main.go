@@ -70,7 +70,7 @@ func main() {
 	handler.NewServersHandler(db, cfg.AList).Register(r)
 	handler.NewFilesHandler(db).Register(r)
 	handler.NewClientsHandler(db).Register(r)
-	dl := handler.NewDownloadHandler(cfg.SmbMounts)
+	dl := handler.NewDownloadHandler(db, cfg.SmbMounts)
 	dl.Register(r)
 	handler.NewTransformHandler(dl).Register(r)
 	handler.NewPreviewHandler(db, cfg.KkFileViewURL).Register(r)
