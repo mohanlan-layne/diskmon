@@ -1,0 +1,50 @@
+# diskmon-client 配置模板
+# 复制此文件为 config.yaml，按实际情况修改后放到 C:\diskmon\
+
+# ── 数据库连接 ─────────────────────────────────────────────────────
+postgres:
+  dsn: "yudao:Yudao@2025@tcp(192.168.1.190:3306)/diskmon?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai"
+
+# ── 服务器标识 ─────────────────────────────────────────────────────
+# server_id 必须唯一，只能包含字母、数字、中划线，不能修改
+server_id: "factory-a"
+# 显示名称（在 diskmon 管理界面显示）
+name: "工厂A 图档服务器"
+# 本机 Windows 账号（SMB 访问用，仅用于 server 端注册显示）
+smb_user: "zjit"
+
+# ── 管理 API ───────────────────────────────────────────────────────
+api:
+  listen: ":19090"       # 本机监听端口，server 端通过此地址下发指令
+  token:  ""             # 留空则不鉴权；生产环境建议设一个随机字符串
+
+# ── 监控卷配置 ─────────────────────────────────────────────────────
+volumes:
+  - name: "D:"
+    journal_size: 134217728   # USN Journal 大小，128 MB，一般不需要改
+    biz_rule: "drawings"      # 对应 rules.go 中注册的规则名，无规则填 ""
+
+  # 如需监控多个卷，照此格式继续添加：
+  # - name: "E:"
+  #   journal_size: 134217728
+  #   biz_rule: ""
+
+# ── 过滤规则 ───────────────────────────────────────────────────────
+filters:
+  # 只监控这些目录（留空则监控整卷）
+  include_dirs:
+    - 'D:\drawings'
+  # 排除这些目录
+  exclude_dirs: []
+  # 只同步这些后缀（留空则同步全部）
+  extensions: []
+  # 只同步这些事件类型（留空则同步全部：create/write/rename/remove）
+  events: []
+
+# ── 其他参数（默认值一般无需修改）────────────────────────────────
+poll_interval_ms: 1000          # USN 轮询间隔（毫秒）
+rename_window_ms: 500           # rename 配对等待窗口（毫秒）
+path_resolver_cache_size: 200000 # FRN→路径 LRU 缓存大小
+
+checkpoint_path: 'C:\diskmon\checkpoints'
+log_path:        'C:\diskmon\logs\client.log'

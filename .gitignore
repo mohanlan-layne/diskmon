@@ -1,10 +1,10 @@
 # binaries
 /bin/
 /server
-*.exe
 
-# build output
-/dist/
+# build output (except packaged releases)
+/dist/*/
+!/dist/diskmon-client/
 
 # env / secrets
 .env
