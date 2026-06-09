@@ -264,7 +264,12 @@ func buildLogger(logPath string) *slog.Logger {
 		return slog.Default()
 	}
 	w := io.MultiWriter(os.Stdout, f)
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			return a
+		},
+	}))
 }
 
 func runAsService(cfg *config.ClientConfig, rescan bool, logger *slog.Logger) {
