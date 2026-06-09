@@ -20,6 +20,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "time/tzdata" // embed IANA timezone database so loc=Asia/Shanghai works on Windows
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
 	"golang.org/x/sys/windows/svc/eventlog"

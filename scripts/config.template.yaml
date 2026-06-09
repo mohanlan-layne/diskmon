@@ -3,7 +3,7 @@
 
 # ── 数据库连接 ─────────────────────────────────────────────────────
 postgres:
-  dsn: "USER:PASSWORD@tcp(DB_HOST:3306)/diskmon?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai"
+  dsn: "USER:PASSWORD@tcp(DB_HOST:3306)/diskmon?parseTime=true&charset=utf8mb4&loc=Local"
 
 # ── 服务器标识 ─────────────────────────────────────────────────────
 # server_id 必须唯一，只能包含字母、数字、中划线，不能修改
