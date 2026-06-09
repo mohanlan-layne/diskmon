@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
 	"golang.org/x/sys/windows/svc/eventlog"
+	"golang.org/x/sys/windows/svc/mgr"
 
 	"diskmon/internal/catalog"
 	"diskmon/internal/checkpoint"
@@ -43,12 +44,33 @@ func main() {
 	runSvc := flag.Bool("service", false, "run as Windows Service")
 	printInfo := flag.Bool("print-info", false, "print server registration info and exit")
 	dryRun := flag.Bool("dry-run", false, "log file events without connecting to the database (for testing)")
+	install := flag.Bool("install", false, "install as an auto-start Windows service (monitor only) and start it")
+	uninstall := flag.Bool("uninstall", false, "stop and remove the Windows service")
 	flag.Parse()
+
+	// Uninstall needs no config.
+	if *uninstall {
+		if err := uninstallService(); err != nil {
+			fmt.Fprintf(os.Stderr, "uninstall failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("service %q stopped and removed\n", serviceName)
+		return
+	}
 
 	cfg, err := config.LoadClient(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *install {
+		if err := installService(*cfgPath); err != nil {
+			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("service %q installed (auto-start on boot, monitor only) and started\n", serviceName)
+		return
 	}
 
 	if *printInfo {
@@ -232,6 +254,88 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan, dryRun bool, log
 
 	wg.Wait()
 	return nil
+}
+
+// installService registers diskmon-client as an auto-start Windows service that
+// runs in monitor-only mode (no rescan) and restarts automatically on failure
+// or reboot. cfgPath is resolved to an absolute path so the service finds it
+// regardless of the working directory SCM launches it from.
+func installService(cfgPath string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate executable: %w", err)
+	}
+	absCfg, err := filepath.Abs(cfgPath)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect to service manager (run as Administrator): %w", err)
+	}
+	defer m.Disconnect()
+
+	if s, err := m.OpenService(serviceName); err == nil {
+		s.Close()
+		return fmt.Errorf("service %q already installed (run --uninstall first)", serviceName)
+	}
+
+	s, err := m.CreateService(serviceName, exePath, mgr.Config{
+		StartType:    mgr.StartAutomatic,
+		DisplayName:  "diskmon file monitor",
+		Description:  "Monitors NTFS volumes via the USN Journal and syncs file metadata to the database.",
+		ErrorControl: mgr.ErrorNormal,
+	}, "--service", "--config", absCfg)
+	if err != nil {
+		return fmt.Errorf("create service: %w", err)
+	}
+	defer s.Close()
+
+	// Auto-restart on crash: wait 5s, then 10s, then 30s; reset the counter
+	// after a day of healthy running.
+	if err := s.SetRecoveryActions([]mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+	}, uint32((24 * time.Hour).Seconds())); err != nil {
+		// Non-fatal: the service is installed, just without recovery policy.
+		fmt.Fprintf(os.Stderr, "warning: could not set recovery actions: %v\n", err)
+	}
+
+	if err := s.Start(); err != nil {
+		return fmt.Errorf("service created but failed to start: %w", err)
+	}
+	return nil
+}
+
+// uninstallService stops and removes the Windows service if present.
+func uninstallService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect to service manager (run as Administrator): %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return fmt.Errorf("service %q not installed: %w", serviceName, err)
+	}
+	defer s.Close()
+
+	// Best-effort stop before deletion; ignore "not running" errors.
+	if status, err := s.Control(svc.Stop); err == nil {
+		// Give it a moment to wind down.
+		deadline := time.Now().Add(10 * time.Second)
+		for status.State != svc.Stopped && time.Now().Before(deadline) {
+			time.Sleep(300 * time.Millisecond)
+			if status, err = s.Query(); err != nil {
+				break
+			}
+		}
+	}
+
+	return s.Delete()
 }
 
 // seedCheckpoints captures the current journal position for each volume that
