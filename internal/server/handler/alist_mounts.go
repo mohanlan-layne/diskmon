@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 )
 
@@ -75,18 +74,17 @@ func (m AListMounts) fileURL(winPath string) (string, bool) {
 	return strings.TrimRight(m.Base, "/") + "/d" + rel, true
 }
 
-// joinMountRel appends a Windows-relative path to an AList mount, escaping each
-// segment. mount is like "/doc1"; rel is like "subfolder1\111.txt".
+// joinMountRel appends a Windows-relative path to an AList mount.
+// mount is like "/doc1"; rel is like "subfolder1\111.txt".
+// Segments are NOT pre-escaped here — callers that need URL encoding (e.g. as a
+// query-parameter value) must apply url.QueryEscape to the full URL themselves,
+// which produces a single level of encoding.
 func joinMountRel(mount, rel string) string {
 	rel = strings.TrimLeft(strings.ReplaceAll(rel, `\`, "/"), "/")
 	if rel == "" {
 		return mount
 	}
-	parts := strings.Split(rel, "/")
-	for i, s := range parts {
-		parts[i] = url.PathEscape(s)
-	}
-	return strings.TrimRight(mount, "/") + "/" + strings.Join(parts, "/")
+	return strings.TrimRight(mount, "/") + "/" + rel
 }
 
 // splitByPrefix returns the path relative to prefix (original case) when winPath

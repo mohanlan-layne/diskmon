@@ -47,9 +47,9 @@ func TestAListMountsResolve(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			name:    "spaces are escaped",
+			name:    "spaces in path",
 			path:    `E:\smb\folder1\doc1\my file.txt`,
-			wantURL: "http://host:5244/d/doc1/my%20file.txt",
+			wantURL: "http://host:5244/d/doc1/my file.txt",
 			wantOK:  true,
 		},
 	}
