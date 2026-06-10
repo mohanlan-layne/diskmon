@@ -29,6 +29,12 @@ jobs:
       - name: Unit tests (client logger - file survives failing console)
         run: go test ./cmd/client/...
 
+      - name: Build server (cross-compile to linux, validates drawing handler)
+        run: GOOS=linux go build ./cmd/server/...
+
+      - name: Unit tests (server - drawing handler tempStore and helpers)
+        run: go test ./internal/server/handler/... -run TestTempStore -v && go test ./internal/server/handler/... -run TestWinParentDir -v
+
       - name: Run USN smoke test
         shell: pwsh
         run: |

@@ -80,6 +80,7 @@ func main() {
 	}
 	handler.NewPreviewHandler(db, kkURL).Register(r)
 	handler.NewFileHandler(db, dl, kkURL).Register(r)
+	handler.NewDrawingHandler(db, dl, kkURL).Register(r)
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,

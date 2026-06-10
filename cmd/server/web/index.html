@@ -208,6 +208,31 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
     <h3 class="apih">辅助　<span class="apim">GET</span> <code class="apic">/api/servers</code></h3>
     <p>列出所有服务器（server_id、名称、在线信息），供选择 serverId。</p>
+
+    <h3 class="apih">G. 图纸预览（东莞图档库）　<span class="apim">GET</span> <code class="apic">/api/drawing/{serverId}/{料号}</code></h3>
+    <p>按料号查找最新的、size&gt;0 的 PDF，302 重定向到 kkFileView 在线预览。<br>
+       由 nginx 注入图档库 serverId，Saber3 前端路径 <code class="apic">/drawing/{料号}</code> 不变。</p>
+    <pre class="apie">curl -L "<span class="b"></span>/api/drawing/dongguan-srv/0931-1234"</pre>
+
+    <h3 class="apih">H. 合并打印（东莞图档库）　<span class="apim">POST</span> <code class="apic">/api/pdf-printing/{serverId}/join</code></h3>
+    <p>第一步：按 pdfName（料号）取各料号最新 PDF，逐页打上 pdfExplain 说明文字（计划跟踪号/采购单号/数量），合并成一个 PDF，返回 <code class="apic">{mergeName}</code>（30 分钟有效）。<br>
+       第二步：<span class="apim">GET</span> <code class="apic">/api/pdf-printing/{serverId}/print/{mergeName}</code> 下载。<br>
+       pdfExplain 留空则不添加说明文字。</p>
+    <pre class="apie">curl -X POST "<span class="b"></span>/api/pdf-printing/dongguan-srv/join" \
+  -H "Content-Type: application/json" \
+  -d '[{"pdfName":"0931-1234","pdfExplain":"计划跟踪号:PTN-001 采购单号:PO-123 数量:5"},
+       {"pdfName":"0932-5678","pdfExplain":""}]'
+# → {"mergeName":"abc123def456....pdf"}
+curl -o merged.pdf "<span class="b"></span>/api/pdf-printing/dongguan-srv/print/abc123def456....pdf"</pre>
+
+    <h3 class="apih">I. 打包下载（东莞图档库）　<span class="apim">POST</span> <code class="apic">/api/pdf-printing/{serverId}/zip</code></h3>
+    <p>第一步：按 biz_keys（料号列表）定位扁平目录下同料号、size&gt;0 的文件，可选 ext 过滤（空=全部格式），打包成 ZIP，返回 <code class="apic">{mergeName}</code>（30 分钟有效）。<br>
+       第二步：<span class="apim">GET</span> <code class="apic">/api/pdf-printing/{serverId}/zip-download/{mergeName}</code> 下载。</p>
+    <pre class="apie">curl -X POST "<span class="b"></span>/api/pdf-printing/dongguan-srv/zip" \
+  -H "Content-Type: application/json" \
+  -d '{"biz_keys":["0931-1234","0932-5678"],"ext":["pdf","dwg","step"]}'
+# → {"mergeName":"abc123def456....zip"}
+curl -o drawings.zip "<span class="b"></span>/api/pdf-printing/dongguan-srv/zip-download/abc123def456....zip"</pre>
   </div>
 </div>
 
