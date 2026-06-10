@@ -171,48 +171,43 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 <!-- ══ 接口文档 tab ════════════════════════════════ -->
 <div id="tab-api" class="tab">
   <div class="toolbar"><h2 style="margin:0">文件服务接口（供外部系统调用）</h2></div>
-  <div style="font-size:13px;line-height:1.7;color:#374151;max-width:960px">
-    <p>以下 HTTP 接口供 ERP/MES 等外部系统调用，<b>无需鉴权</b>（内网信任）。
-       Base 地址：<code id="api-base" class="apic"></code>，返回均为 JSON（下载/打包为文件流）。</p>
+  <div style="font-size:13px;line-height:1.7;color:#374151;max-width:980px">
+    <p>供 ERP/MES/PLM、第三方系统、AI 等调用，<b>无需鉴权</b>（内网信任）。Base 地址：
+       <code id="api-base" class="apic"></code>。一切以<b>料号(biz_key)+serverId</b>定位；单个文件用<b>文件ID</b>（查清单返回，全局唯一、不暴露物理路径）。</p>
 
-    <h3 class="apih">1. 查询文件　<span class="apim">GET</span> <code class="apic">/api/files</code></h3>
-    <p>按条件查询文件目录。参数（均可选，query string）：</p>
-    <table class="apit">
-      <tr><th>参数</th><th>说明</th></tr>
-      <tr><td>server_id</td><td>服务器 ID，如 <code>cnc-10hao</code></td></tr>
-      <tr><td>biz_key</td><td>业务料号，如 <code>0931-5000013</code></td></tr>
-      <tr><td>ext</td><td>扩展名精确匹配，如 <code>.NC</code></td></tr>
-      <tr><td>path_prefix</td><td>路径前缀匹配</td></tr>
-      <tr><td>is_dir</td><td><code>true</code>/<code>false</code> 仅目录/仅文件</td></tr>
-      <tr><td>limit / offset</td><td>分页，limit 默认 100、上限 1000</td></tr>
-    </table>
-    <pre class="apie">curl "<span class="b"></span>/api/files?server_id=cnc-10hao&biz_key=0931-5000013"</pre>
+    <h3 class="apih">A. 查料号文件清单　<span class="apim">GET</span> <code class="apic">/api/biz/{serverId}/{bizKey}/files</code></h3>
+    <p>返回该料号下全部文件；<code>ext</code> 可选、逗号分隔按扩展名过滤。每条带 <code>id</code>（供 B/C/E 使用）、<code>rel</code>（相对料号文件夹的路径）。</p>
+    <pre class="apie">curl "<span class="b"></span>/api/biz/cnc-10hao/0931-5000013/files?ext=.pdf,.nc"
+# → [{ "id":123,"name":"x.pdf","ext":".pdf","size":1024,"modified":"...","rel":"ZM/x.pdf" }]</pre>
 
-    <h3 class="apih">2. 在线预览　<span class="apim">GET</span> <code class="apic">/api/files/preview</code></h3>
-    <p>参数 <code>server_id</code>、<code>path</code>（文件完整路径）。302 跳转到 kkFileView 预览页，浏览器直接打开即可。</p>
-    <pre class="apie">&lt;a href="<span class="b"></span>/api/files/preview?server_id=cnc-10hao&path=E:\...\x.pdf" target="_blank"&gt;预览&lt;/a&gt;</pre>
+    <h3 class="apih">B. 下载单个文件　<span class="apim">GET</span> <code class="apic">/api/file/{id}/download</code></h3>
+    <p>按文件 ID 下载，302 跳 AList 直链。</p>
+    <pre class="apie"><span class="b"></span>/api/file/123/download</pre>
 
-    <h3 class="apih">3. 单文件下载　<span class="apim">GET</span> <code class="apic">/api/files/dl</code></h3>
-    <p>参数 <code>server_id</code>、<code>path</code>。302 跳转到 AList 直链下载。</p>
-    <pre class="apie"><span class="b"></span>/api/files/dl?server_id=cnc-10hao&path=E:\...\x.NC</pre>
+    <h3 class="apih">C. 在线预览　<span class="apim">GET</span> <code class="apic">/api/file/{id}/preview</code></h3>
+    <p>按文件 ID 预览，302 跳 kkFileView 预览页，浏览器直接打开。</p>
+    <pre class="apie">&lt;a href="<span class="b"></span>/api/file/123/preview" target="_blank"&gt;预览&lt;/a&gt;</pre>
 
-    <h3 class="apih">4. 多文件/目录打包　<span class="apim">POST</span> <code class="apic">/api/files/zip</code></h3>
-    <p>请求体 JSON：<code>{"server_id":"...","paths":["...","..."]}</code>。paths 可为文件或目录（目录递归），返回 ZIP 流。<b>总文件数上限 100</b>，超出返回 400。</p>
-    <pre class="apie">curl -X POST "<span class="b"></span>/api/files/zip" \
-  -H "Content-Type: application/json" \
-  -d '{"server_id":"cnc-10hao","paths":["E:\\...\\dir1","E:\\...\\a.NC"]}' \
-  -o pack.zip</pre>
+    <h3 class="apih">D1. 按料号打包　<span class="apim">GET</span> <code class="apic">/api/biz/{serverId}/{bizKey}/zip</code></h3>
+    <p>打成 <code>&lt;料号&gt;.zip</code>（保留目录结构），浏览器可直接下载；<code>ext</code> 可选过滤（如只打包设计文件传 <code>ext=.pdf</code>）。</p>
+    <pre class="apie">&lt;a href="<span class="b"></span>/api/biz/cnc-10hao/0931-5000013/zip?ext=.pdf"&gt;下载&lt;/a&gt;</pre>
 
-    <h3 class="apih">5. 按料号查文件　<span class="apim">GET</span> <code class="apic">/api/biz/{server_id}/{biz_key}/files</code></h3>
-    <p>返回该料号下全部文件（含目录），无需知道具体路径。</p>
-    <pre class="apie">curl "<span class="b"></span>/api/biz/cnc-10hao/0931-5000013/files"</pre>
+    <h3 class="apih">D2. 多料号打包　<span class="apim">POST</span> <code class="apic">/api/biz/zip</code></h3>
+    <p>多个料号打成一个 zip（每料号一个顶层目录）。<code>ext</code> 可选过滤。<b>总文件数上限 500</b>。</p>
+    <pre class="apie">curl -X POST "<span class="b"></span>/api/biz/zip" -H "Content-Type: application/json" \
+  -d '{"server_id":"cnc-10hao","biz_keys":["0931-5000013","A-2535270045A"],"ext":[".pdf"]}' -o pack.zip</pre>
 
-    <h3 class="apih">6. 按料号打包下载　<span class="apim">GET</span> <code class="apic">/api/biz/{server_id}/{biz_key}/zip</code></h3>
-    <p>把该料号文件夹下所有文件打成 <code>&lt;料号&gt;.zip</code>（保留目录结构），浏览器可直接下载。<b>文件数上限 100</b>。</p>
-    <pre class="apie">&lt;a href="<span class="b"></span>/api/biz/cnc-10hao/0931-5000013/zip"&gt;下载料号&lt;/a&gt;</pre>
+    <h3 class="apih">E. 加水印　<span class="apim">GET</span> <code class="apic">/api/file/{id}/watermark</code></h3>
+    <p>对 PDF 加文字水印并返回。参数：<code>text</code>(必填)、<code>size</code>字号、<code>pos</code>位置(c/tl/tr/bl/br)、<code>opacity</code>透明度(0~1)、<code>rotation</code>旋转角。</p>
+    <pre class="apie"><span class="b"></span>/api/file/123/watermark?text=机密&size=48&pos=c&opacity=0.3&rotation=45</pre>
+
+    <h3 class="apih">F. 多料号拼 PDF　<span class="apim">POST</span> <code class="apic">/api/biz/merge-pdf</code></h3>
+    <p>每个料号取<b>最新的一个 PDF</b>，按传入顺序拼成一个 PDF 返回。</p>
+    <pre class="apie">curl -X POST "<span class="b"></span>/api/biz/merge-pdf" -H "Content-Type: application/json" \
+  -d '{"server_id":"cnc-10hao","biz_keys":["0931-5000013","A-2535270045A"]}' -o merged.pdf</pre>
 
     <h3 class="apih">辅助　<span class="apim">GET</span> <code class="apic">/api/servers</code></h3>
-    <p>列出所有服务器（含 server_id、名称、在线信息），供选择 server_id。</p>
+    <p>列出所有服务器（server_id、名称、在线信息），供选择 serverId。</p>
   </div>
 </div>
 

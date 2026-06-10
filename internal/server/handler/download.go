@@ -50,7 +50,12 @@ func (h *DownloadHandler) single(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "server_id and path required", http.StatusBadRequest)
 		return
 	}
+	h.serveByPath(w, r, serverID, path)
+}
 
+// serveByPath redirects to the AList direct-download link when the server has
+// AList mounts, otherwise streams the file from the pod's SMB mount.
+func (h *DownloadHandler) serveByPath(w http.ResponseWriter, r *http.Request, serverID, path string) {
 	// Prefer AList direct download when configured.
 	if mounts, err := loadAListMounts(r.Context(), h.db, serverID); err == nil {
 		if dlURL, ok := mounts.fileURL(path); ok {

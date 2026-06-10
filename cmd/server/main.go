@@ -79,6 +79,7 @@ func main() {
 		kkURL = cfg.KkFileViewURL
 	}
 	handler.NewPreviewHandler(db, kkURL).Register(r)
+	handler.NewFileHandler(db, dl, kkURL).Register(r)
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
