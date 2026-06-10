@@ -44,8 +44,8 @@ func (z *alistZipper) downloadURL(alistPath string) string {
 	return z.base + "/d/" + strings.Join(parts, "/")
 }
 
-// addFile streams one AList file into the archive under zipName.
-func (z *alistZipper) addFile(ctx context.Context, zw *zip.Writer, alistPath, zipName string) error {
+// download streams the AList file at alistPath to w.
+func (z *alistZipper) download(ctx context.Context, alistPath string, w io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, z.downloadURL(alistPath), nil)
 	if err != nil {
 		return err
@@ -58,10 +58,15 @@ func (z *alistZipper) addFile(ctx context.Context, zw *zip.Writer, alistPath, zi
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: status %d", alistPath, resp.StatusCode)
 	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
+// addFile streams one AList file into the archive under zipName.
+func (z *alistZipper) addFile(ctx context.Context, zw *zip.Writer, alistPath, zipName string) error {
 	w, err := zw.Create(zipName)
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(w, resp.Body)
-	return err
+	return z.download(ctx, alistPath, w)
 }

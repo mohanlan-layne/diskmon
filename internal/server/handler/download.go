@@ -257,6 +257,40 @@ func addFileToZip(zw *zip.Writer, localPath, zipName string) error {
 	return err
 }
 
+// fetchLocal returns a local filesystem path for winPath plus a cleanup func to
+// call when done. For AList-backed servers (no local SMB mount) it downloads the
+// file to a temp file; otherwise it returns the SMB mount path directly. The
+// pattern is passed to os.CreateTemp (e.g. "diskmon-wm-*.pdf").
+func (h *DownloadHandler) fetchLocal(ctx context.Context, serverID, winPath, pattern string) (string, func(), error) {
+	if mounts, err := loadAListMounts(ctx, h.db, serverID); err == nil {
+		alistPath, ok := mounts.resolveURLPath(winPath, false)
+		if !ok {
+			return "", nil, fmt.Errorf("路径不在任何 AList 挂载目录下: %s", winPath)
+		}
+		tmp, err := os.CreateTemp("", pattern)
+		if err != nil {
+			return "", nil, err
+		}
+		cleanup := func() { os.Remove(tmp.Name()) }
+		if err := newAListZipper(mounts.Base).download(ctx, alistPath, tmp); err != nil {
+			tmp.Close()
+			cleanup()
+			return "", nil, err
+		}
+		if err := tmp.Close(); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+		return tmp.Name(), cleanup, nil
+	}
+
+	lp, err := h.resolveSMBPath(serverID, winPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return lp, func() {}, nil
+}
+
 // resolveSMBPath maps a Windows path (server_id + "D:\foo\bar") to its local
 // mount point path (e.g. "/mnt/server-a-d/foo/bar").
 func (h *DownloadHandler) resolveSMBPath(serverID, winPath string) (string, error) {

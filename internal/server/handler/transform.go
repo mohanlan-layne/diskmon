@@ -49,11 +49,12 @@ func (h *TransformHandler) watermark(w http.ResponseWriter, r *http.Request) {
 		body.Opacity = 0.3
 	}
 
-	localPath, err := h.dl.resolveSMBPath(body.ServerID, body.Path)
+	localPath, cleanup, err := h.dl.fetchLocal(r.Context(), body.ServerID, body.Path, "diskmon-wm-src-*.pdf")
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer cleanup()
 
 	tmp, err := os.CreateTemp("", "diskmon-wm-*.pdf")
 	if err != nil {
@@ -98,12 +99,19 @@ func (h *TransformHandler) merge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var localPaths []string
+	var cleanups []func()
+	defer func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}()
 	for _, p := range body.Paths {
-		lp, err := h.dl.resolveSMBPath(body.ServerID, p)
+		lp, cleanup, err := h.dl.fetchLocal(r.Context(), body.ServerID, p, "diskmon-merge-src-*.pdf")
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		cleanups = append(cleanups, cleanup)
 		localPaths = append(localPaths, lp)
 	}
 
