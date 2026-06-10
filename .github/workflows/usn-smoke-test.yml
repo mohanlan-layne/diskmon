@@ -26,6 +26,9 @@ jobs:
       - name: Build client
         run: go build -o diskmon-client.exe ./cmd/client/
 
+      - name: Unit tests (client logger: file survives failing console)
+        run: go test ./cmd/client/...
+
       - name: Run USN smoke test
         shell: pwsh
         run: |
