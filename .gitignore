@@ -1,6 +1,7 @@
 # binaries
 /bin/
 /server
+*.exe
 
 # build output (except packaged releases)
 /dist/*/

@@ -189,9 +189,56 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
       <input id="log-lines" type="number" value="200" style="width:80px"> 行
       <button class="btn sm" onclick="reloadLogs()">刷新</button>
+      <button class="btn danger sm" onclick="clearLogs()">清理日志</button>
       <button class="btn grey sm" style="margin-left:auto" onclick="closeModal('modal-logs')">关闭</button>
     </div>
     <div class="log-box" id="log-content">加载中...</div>
+  </div>
+</div>
+
+<!-- ══ 编辑服务器弹窗 ════════════════════════════════ -->
+<div class="modal-bg" id="modal-edit-server">
+  <div class="modal" style="width:520px">
+    <h2>编辑服务器</h2>
+    <input type="hidden" id="es-id">
+    <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:center">
+      <label>显示名</label><input id="es-name">
+      <label>SMB 主机</label><input id="es-smbhost">
+      <label>SMB 账号</label><input id="es-smbuser" placeholder="如 EASTWINSZ\zjit">
+      <label>SMB 密码</label><input id="es-smbpass" type="password" placeholder="留空＝不修改">
+      <label>管理 API 地址</label><input id="es-apiaddr" placeholder="如 192.168.1.15:19090">
+      <label>系统根路径</label><input id="es-sysroot" placeholder="如 E:\file15\1.2_部门文件">
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+      <button class="btn grey sm" onclick="closeModal('modal-edit-server')">取消</button>
+      <button class="btn sm" onclick="saveServer()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 客户端配置弹窗 ════════════════════════════════ -->
+<div class="modal-bg" id="modal-client-config">
+  <div class="modal" style="width:600px">
+    <h2 id="cc-title">客户端配置</h2>
+    <div id="cc-readonly" style="font-size:12px;color:#6b7280;margin-bottom:10px"></div>
+    <div style="display:grid;grid-template-columns:130px 1fr;gap:8px;align-items:center">
+      <label>显示名</label><input id="cc-name">
+      <label>监控目录<br><span style="font-size:11px;color:#9ca3af">每行一个</span></label>
+      <textarea id="cc-include" rows="3" style="font-family:monospace"></textarea>
+      <label>排除目录<br><span style="font-size:11px;color:#9ca3af">每行一个</span></label>
+      <textarea id="cc-exclude" rows="2" style="font-family:monospace"></textarea>
+      <label>扩展名过滤<br><span style="font-size:11px;color:#9ca3af">逗号分隔，空=全部</span></label>
+      <input id="cc-ext" placeholder="如 .pdf,.nc">
+      <label>事件过滤<br><span style="font-size:11px;color:#9ca3af">逗号分隔，空=全部</span></label>
+      <input id="cc-events" placeholder="如 create,write,rename,remove">
+      <label>轮询间隔(ms)</label><input id="cc-poll" type="number">
+      <label>重命名窗口(ms)</label><input id="cc-rename" type="number">
+    </div>
+    <p style="font-size:11px;color:#dc2626;margin:10px 0 0">⚠ 保存后 client 会自动重启以生效（监控目录变更后通常需要再「重新扫描」）。</p>
+    <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+      <button class="btn grey sm" onclick="closeModal('modal-client-config')">取消</button>
+      <button class="btn sm" onclick="saveClientConfig()">保存并重启</button>
+    </div>
   </div>
 </div>
 
@@ -243,8 +290,9 @@ async function loadServers() {
           <button class="btn sm grey" onclick="checkHealth('${s.server_id}')">连通检测</button>
           <button class="btn sm" onclick="showLogs('${s.server_id}')">日志</button>
           <button class="btn sm grey" onclick="doRescan('${s.server_id}')">重新扫描</button>
-          <button class="btn sm grey" onclick="doRestart('${s.server_id}')">重启</button>
-          <button class="btn sm grey" onclick="configAList('${s.server_id}')">配置AList</button>
+          <button class="btn sm grey" onclick="editServer('${s.server_id}')">编辑</button>
+          <button class="btn sm grey" onclick="clientConfig('${s.server_id}')">客户端配置</button>
+          <button class="btn sm grey" onclick="viewAList('${s.server_id}')">AList</button>
           <button class="btn sm danger" onclick="deleteServer('${s.server_id}')">删除</button>
         </div>
       </td>
@@ -599,10 +647,92 @@ async function doRescan(id) {
   const { ok, data } = await api('POST', `/api/clients/${id}/rescan`);
   alert(ok ? '✓ 重扫已启动，可查看日志跟踪进度' : `失败: ${data?.error || '无法连接 client'}`);
 }
-async function doRestart(id) {
-  if (!confirm(`确认重启服务器 ${id} 的 diskmon-client 服务？`)) return;
-  const { ok, data } = await api('POST', `/api/clients/${id}/restart`);
-  alert(ok ? '✓ 重启指令已发送' : `失败: ${data?.error || '无法连接 client'}`);
+async function clearLogs() {
+  if (!confirm(`确认清空 ${currentLogServer} 的客户端日志文件？`)) return;
+  const { ok, data } = await api('POST', `/api/clients/${currentLogServer}/logs/clear`);
+  if (ok) { alert('✓ 日志已清空'); reloadLogs(); }
+  else alert(`失败: ${data?.error || data || '无法连接 client'}`);
+}
+
+// ── 编辑服务器记录（部分更新，密码留空＝不改）────────
+function editServer(id) {
+  const s = serversCache.find(x => x.server_id === id);
+  if (!s) return;
+  document.getElementById('es-id').value = id;
+  document.getElementById('es-name').value = s.name || '';
+  document.getElementById('es-smbhost').value = s.smb_host || '';
+  document.getElementById('es-smbuser').value = s.smb_user || '';
+  document.getElementById('es-smbpass').value = '';
+  document.getElementById('es-apiaddr').value = s.api_addr || '';
+  document.getElementById('es-sysroot').value = s.sys_root || '';
+  document.getElementById('modal-edit-server').classList.add('show');
+}
+async function saveServer() {
+  const id = document.getElementById('es-id').value;
+  const body = {
+    name:     document.getElementById('es-name').value,
+    smb_host: document.getElementById('es-smbhost').value,
+    smb_user: document.getElementById('es-smbuser').value,
+    api_addr: document.getElementById('es-apiaddr').value,
+    sys_root: document.getElementById('es-sysroot').value,
+  };
+  const pass = document.getElementById('es-smbpass').value;
+  if (pass) body.smb_pass = pass;   // 留空＝保留原密码
+  const { ok, data } = await api('PUT', `/api/servers/${id}`, body);
+  if (ok) { alert('✓ 已保存'); closeModal('modal-edit-server'); loadServers(); }
+  else alert('失败：' + (data?.error || data || ''));
+}
+
+// ── 客户端监控参数（GET/PUT /api/clients/{id}/config）──
+let ccServerId = '';
+async function clientConfig(id) {
+  const { ok, data } = await api('GET', `/api/clients/${id}/config`);
+  if (!ok || typeof data !== 'object') {
+    alert('无法获取客户端配置：' + (data?.error || data || '无法连接 client')); return;
+  }
+  ccServerId = id;
+  const f = data.filters || {};
+  document.getElementById('cc-title').textContent = `客户端配置 — ${id}`;
+  document.getElementById('cc-name').value = data.name || '';
+  document.getElementById('cc-include').value = (f.include_dirs || []).join('\n');
+  document.getElementById('cc-exclude').value = (f.exclude_dirs || []).join('\n');
+  document.getElementById('cc-ext').value = (f.extensions || []).join(',');
+  document.getElementById('cc-events').value = (f.events || []).join(',');
+  document.getElementById('cc-poll').value = data.poll_interval_ms || '';
+  document.getElementById('cc-rename').value = data.rename_window_ms || '';
+  const vols = (data.volumes || []).map(v => `${v.name}(${v.biz_rule || '无规则'})`).join(', ');
+  document.getElementById('cc-readonly').textContent =
+    `卷/料号规则(只读)：${vols} ｜ checkpoint：${data.checkpoint_path} ｜ 日志：${data.log_path}`;
+  document.getElementById('modal-client-config').classList.add('show');
+}
+async function saveClientConfig() {
+  const lines = s => s.split('\n').map(x => x.trim()).filter(Boolean);
+  const comma = s => s.split(',').map(x => x.trim()).filter(Boolean);
+  const body = {
+    name:             document.getElementById('cc-name').value,
+    include_dirs:     lines(document.getElementById('cc-include').value),
+    exclude_dirs:     lines(document.getElementById('cc-exclude').value),
+    extensions:       comma(document.getElementById('cc-ext').value),
+    events:           comma(document.getElementById('cc-events').value),
+    poll_interval_ms: parseInt(document.getElementById('cc-poll').value) || 0,
+    rename_window_ms: parseInt(document.getElementById('cc-rename').value) || 0,
+  };
+  if (!confirm('保存后 client 将自动重启以生效，确认？')) return;
+  const { ok, data } = await api('PUT', `/api/clients/${ccServerId}/config`, body);
+  if (ok) { alert('✓ 已保存，client 正在重启加载新配置'); closeModal('modal-client-config'); }
+  else alert('失败：' + (data?.error || data || '无法连接 client'));
+}
+
+// ── 查看 AList 挂载配置（确认后可重新配置）──────────
+function viewAList(id) {
+  const s = serversCache.find(x => x.server_id === id);
+  const a = s && s.alist_urls;
+  let cur = '（未配置 AList 挂载）';
+  if (a && a.mounts && a.mounts.length) {
+    cur = 'Base: ' + (a.base || '') + '\n\n挂载映射：\n' +
+      a.mounts.map(m => '  ' + m.prefix + '  →  ' + m.mount).join('\n');
+  }
+  if (confirm(cur + '\n\n点「确定」重新配置 AList 挂载。')) configAList(id);
 }
 
 // ── AList 连通性测试 ──────────────────────────────

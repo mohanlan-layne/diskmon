@@ -130,6 +130,30 @@ func LoadClient(path string) (*ClientConfig, error) {
 	return &cfg, nil
 }
 
+// ValidateClient applies defaults and validates a ClientConfig (used before
+// persisting a remotely-edited config so an invalid one is never written).
+func ValidateClient(c *ClientConfig) error {
+	c.setDefaults()
+	return c.validate()
+}
+
+// SaveClient writes the client config back to path as YAML, atomically (write to
+// a temp file then rename). Comments in the original file are not preserved.
+func SaveClient(path string, c *ClientConfig) error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write temp config %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace config %s: %w", path, err)
+	}
+	return nil
+}
+
 // LoadServer reads and validates a ServerConfig from the given YAML file path.
 // Environment variable overrides:
 //   - POSTGRES_DSN  → postgres.dsn

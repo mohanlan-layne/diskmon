@@ -1,0 +1,40 @@
+# diskmon client 配置 —— 192.168.1.15 CNC 程式目录（料号业务 ID）
+#
+# 跑在 192.168.1.15 本机，通过 NTFS USN Journal 监控本地 E 盘，
+# 只监控 CNC 程式子树，提取料号作为 biz_key（规则见 partnumber.go）。
+# 物理路径：share "1.2_部门文件" = E:\file15\1.2_部门文件
+
+# diskmon 数据库（从 192.168.1.15 直连 192.168.1.190）
+postgres:
+  dsn: "yudao:Yudao@2025@tcp(192.168.1.190:3306)/diskmon?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai"
+
+server_id: "cnc-10hao"
+name: "10号厂房-精密加工CNC"
+
+# 仅记录用；实际 SMB 暴露由 server 端 AList 挂载
+smb_user: "EASTWINSZ\\zjit"
+
+checkpoint_path: "D:\\diskmon\\checkpoints"
+log_path: "D:\\diskmon\\logs\\client.log"
+
+# 内嵌管理 HTTP（rescan 等操作用）
+api:
+  listen: ":19090"
+  token: "03e32f4bc1e42f06af5d863c2f125b91"
+
+poll_interval_ms: 1000
+rename_window_ms: 500
+path_resolver_cache_size: 200000
+
+volumes:
+  - name: "E:"
+    journal_size: 134217728      # 128 MB
+    biz_rule: "partnumber"
+
+filters:
+  # 只监控 CNC 程式子树
+  include_dirs:
+    - "E:\\file15\\1.2_部门文件\\1042 数智运营研发中心\\1046 制造部\\1046 精密加工中心\\10号厂房程式\\CNC"
+  exclude_dirs: []
+  extensions: []                 # 空 = 所有文件
+  events: []                     # 空 = 所有事件

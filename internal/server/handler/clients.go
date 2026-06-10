@@ -28,9 +28,11 @@ func NewClientsHandler(db *sql.DB) *ClientsHandler {
 // Register mounts client management routes.
 func (h *ClientsHandler) Register(r chi.Router) {
 	r.Get("/api/clients/{id}/logs", h.logs)
+	r.Post("/api/clients/{id}/logs/clear", h.clearLogs)
 	r.Post("/api/clients/{id}/rescan", h.rescan)
-	r.Post("/api/clients/{id}/restart", h.restart)
 	r.Get("/api/clients/{id}/health", h.health)
+	r.Get("/api/clients/{id}/config", h.getConfig)
+	r.Put("/api/clients/{id}/config", h.putConfig)
 }
 
 func (h *ClientsHandler) logs(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +45,16 @@ func (h *ClientsHandler) logs(w http.ResponseWriter, r *http.Request) {
 	if lines != "" {
 		targetURL += "?lines=" + url.QueryEscape(lines)
 	}
-	h.proxy(w, r, http.MethodGet, targetURL, token)
+	h.proxy(w, r, http.MethodGet, targetURL, token, nil)
+}
+
+func (h *ClientsHandler) clearLogs(w http.ResponseWriter, r *http.Request) {
+	targetURL, token, err := h.clientURL(r, chi.URLParam(r, "id"), "/logs/clear")
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	h.proxy(w, r, http.MethodPost, targetURL, token, nil)
 }
 
 func (h *ClientsHandler) rescan(w http.ResponseWriter, r *http.Request) {
@@ -52,16 +63,7 @@ func (h *ClientsHandler) rescan(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	h.proxy(w, r, http.MethodPost, targetURL, token)
-}
-
-func (h *ClientsHandler) restart(w http.ResponseWriter, r *http.Request) {
-	targetURL, token, err := h.clientURL(r, chi.URLParam(r, "id"), "/restart")
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	h.proxy(w, r, http.MethodPost, targetURL, token)
+	h.proxy(w, r, http.MethodPost, targetURL, token, nil)
 }
 
 func (h *ClientsHandler) health(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +72,25 @@ func (h *ClientsHandler) health(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	h.proxy(w, r, http.MethodGet, targetURL, token)
+	h.proxy(w, r, http.MethodGet, targetURL, token, nil)
+}
+
+func (h *ClientsHandler) getConfig(w http.ResponseWriter, r *http.Request) {
+	targetURL, token, err := h.clientURL(r, chi.URLParam(r, "id"), "/config")
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	h.proxy(w, r, http.MethodGet, targetURL, token, nil)
+}
+
+func (h *ClientsHandler) putConfig(w http.ResponseWriter, r *http.Request) {
+	targetURL, token, err := h.clientURL(r, chi.URLParam(r, "id"), "/config")
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	h.proxy(w, r, http.MethodPut, targetURL, token, r.Body)
 }
 
 func (h *ClientsHandler) clientURL(r *http.Request, serverID, path string) (string, string, error) {
@@ -85,14 +105,17 @@ func (h *ClientsHandler) clientURL(r *http.Request, serverID, path string) (stri
 	return "http://" + apiAddr + path, apiToken, nil
 }
 
-func (h *ClientsHandler) proxy(w http.ResponseWriter, r *http.Request, method, targetURL, token string) {
-	req, err := http.NewRequestWithContext(r.Context(), method, targetURL, nil)
+func (h *ClientsHandler) proxy(w http.ResponseWriter, r *http.Request, method, targetURL, token string, body io.Reader) {
+	req, err := http.NewRequestWithContext(r.Context(), method, targetURL, body)
 	if err != nil {
 		jsonError(w, "build request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := h.http.Do(req)
 	if err != nil {

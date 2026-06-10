@@ -38,6 +38,10 @@ import (
 
 const serviceName = "diskmon-client"
 
+// cfgFilePath is the path of the loaded config file, captured at startup so the
+// embedded management API can persist remote config edits back to it.
+var cfgFilePath string
+
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to client config YAML")
 	rescan := flag.Bool("rescan", false, "force a full rescan before monitoring")
@@ -47,6 +51,8 @@ func main() {
 	install := flag.Bool("install", false, "install as an auto-start Windows service (monitor only) and start it")
 	uninstall := flag.Bool("uninstall", false, "stop and remove the Windows service")
 	flag.Parse()
+
+	cfgFilePath = *cfgPath
 
 	// Uninstall needs no config.
 	if *uninstall {
@@ -214,7 +220,7 @@ func run(ctx context.Context, cfg *config.ClientConfig, rescan, dryRun bool, log
 	var wg sync.WaitGroup
 
 	if !dryRun && cfg.API.Listen != "" {
-		api := clientapi.New(cfg, func(ctx context.Context) error {
+		api := clientapi.New(cfg, cfgFilePath, func(ctx context.Context) error {
 			return s.Run(ctx)
 		})
 		wg.Add(1)

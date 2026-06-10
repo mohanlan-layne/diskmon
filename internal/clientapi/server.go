@@ -11,32 +11,36 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"diskmon/internal/config"
 )
 
-// RescanFunc is called by the restart/rescan endpoints.
+// RescanFunc is called by the rescan endpoint.
 type RescanFunc func(ctx context.Context) error
 
 // Server is the local HTTP management server embedded in the client.
 type Server struct {
-	cfg    *config.ClientConfig
-	rescan RescanFunc
+	cfg     *config.ClientConfig
+	cfgPath string
+	rescan  RescanFunc
 }
 
-// New creates a Server.
-func New(cfg *config.ClientConfig, rescan RescanFunc) *Server {
-	return &Server{cfg: cfg, rescan: rescan}
+// New creates a Server. cfgPath is the path of the config file on disk, used by
+// the /config endpoint to persist remote edits.
+func New(cfg *config.ClientConfig, cfgPath string, rescan RescanFunc) *Server {
+	return &Server{cfg: cfg, cfgPath: cfgPath, rescan: rescan}
 }
 
 // Start registers routes and begins serving on cfg.API.Listen.
 // It runs until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/logs", s.authMiddleware(s.handleLogs))
-	mux.HandleFunc("/rescan", s.authMiddleware(s.handleRescan))
-	mux.HandleFunc("/restart", s.authMiddleware(s.handleRestart))
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/logs", s.authMiddleware(s.handleLogs))
+	mux.HandleFunc("/logs/clear", s.authMiddleware(s.handleClearLogs))
+	mux.HandleFunc("/rescan", s.authMiddleware(s.handleRescan))
+	mux.HandleFunc("/config", s.authMiddleware(s.handleConfig))
 
 	srv := &http.Server{
 		Addr:    s.cfg.API.Listen,
@@ -55,8 +59,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // handleLogs tails the client log file.
@@ -84,6 +87,22 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, strings.Join(lines, "\n"))
 }
 
+// handleClearLogs truncates the client log file to zero length.
+// POST /logs/clear
+func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// The logger appends, so truncating to 0 makes the next line start at the
+	// beginning — no holes.
+	if err := os.Truncate(s.cfg.LogPath, 0); err != nil {
+		http.Error(w, "cannot clear log: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "log cleared"})
+}
+
 // handleRescan triggers a full rescan in a background goroutine.
 // POST /rescan
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
@@ -98,25 +117,113 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		_ = s.rescan(context.Background())
 	}()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "rescan started"}) //nolint:errcheck
+	writeJSON(w, map[string]string{"status": "rescan started"})
 }
 
-// handleRestart exits the process; the Windows Service manager will restart it.
-// POST /restart
-func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "restarting"}) //nolint:errcheck
+// volumeView is the read-only volume info returned by GET /config.
+type volumeView struct {
+	Name    string `json:"name"`
+	BizRule string `json:"biz_rule"`
+}
 
-	// Flush the response before exiting.
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+// configView is the editable + read-only config returned by GET /config.
+type configView struct {
+	ServerID       string               `json:"server_id"`
+	Name           string               `json:"name"`
+	CheckpointPath string               `json:"checkpoint_path"`
+	LogPath        string               `json:"log_path"`
+	PollIntervalMs int                  `json:"poll_interval_ms"`
+	RenameWindowMs int                  `json:"rename_window_ms"`
+	Volumes        []volumeView         `json:"volumes"`
+	Filters        config.FiltersConfig `json:"filters"`
+}
+
+// configPatch carries the editable fields for PUT /config. Pointers distinguish
+// "field omitted" from "set to empty".
+type configPatch struct {
+	Name           *string   `json:"name"`
+	IncludeDirs    *[]string `json:"include_dirs"`
+	ExcludeDirs    *[]string `json:"exclude_dirs"`
+	Extensions     *[]string `json:"extensions"`
+	Events         *[]string `json:"events"`
+	PollIntervalMs *int      `json:"poll_interval_ms"`
+	RenameWindowMs *int      `json:"rename_window_ms"`
+}
+
+// handleConfig serves the editable client parameters.
+//
+//	GET  /config  → current parameters
+//	PUT  /config  → apply edits, persist, and exit so the service restarts with
+//	                the new config (monitoring parameters only take effect on
+//	                restart). Volumes and biz_rule are read-only here.
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		vols := make([]volumeView, 0, len(s.cfg.Volumes))
+		for _, v := range s.cfg.Volumes {
+			vols = append(vols, volumeView{Name: v.Name, BizRule: v.BizRule})
+		}
+		writeJSON(w, configView{
+			ServerID:       s.cfg.ServerID,
+			Name:           s.cfg.Name,
+			CheckpointPath: s.cfg.CheckpointPath,
+			LogPath:        s.cfg.LogPath,
+			PollIntervalMs: s.cfg.PollIntervalMs,
+			RenameWindowMs: s.cfg.RenameWindowMs,
+			Volumes:        vols,
+			Filters:        s.cfg.Filters,
+		})
+	case http.MethodPut:
+		var p configPatch
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		applyPatch(s.cfg, p)
+		// Validate before persisting so a bad edit can't leave the client unable
+		// to start after restart.
+		if err := config.ValidateClient(s.cfg); err != nil {
+			http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.SaveClient(s.cfgPath, s.cfg); err != nil {
+			http.Error(w, "save config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "config saved; client restarting to apply"})
+		// Exit after the response flushes; the Windows service auto-restarts and
+		// loads the new config.
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			os.Exit(0)
+		}()
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	os.Exit(0)
+}
+
+func applyPatch(cfg *config.ClientConfig, p configPatch) {
+	if p.Name != nil {
+		cfg.Name = *p.Name
+	}
+	if p.IncludeDirs != nil {
+		cfg.Filters.IncludeDirs = *p.IncludeDirs
+	}
+	if p.ExcludeDirs != nil {
+		cfg.Filters.ExcludeDirs = *p.ExcludeDirs
+	}
+	if p.Extensions != nil {
+		cfg.Filters.Extensions = *p.Extensions
+	}
+	if p.Events != nil {
+		cfg.Filters.Events = *p.Events
+	}
+	if p.PollIntervalMs != nil {
+		cfg.PollIntervalMs = *p.PollIntervalMs
+	}
+	if p.RenameWindowMs != nil {
+		cfg.RenameWindowMs = *p.RenameWindowMs
+	}
 }
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -134,3 +241,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v) //nolint:errcheck
+}

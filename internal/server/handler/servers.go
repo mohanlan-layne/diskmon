@@ -297,29 +297,34 @@ func (h *ServersHandler) get(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, s)
 }
 
+// update partially updates a server record: only the fields present in the body
+// (non-null) are changed; omitted fields keep their current value (COALESCE), so
+// editing e.g. the name never wipes the stored SMB password or API token, which
+// the list endpoint does not return.
 func (h *ServersHandler) update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var body struct {
-		Name     string          `json:"name"`
-		SmbHost  string          `json:"smb_host"`
-		SmbUser  string          `json:"smb_user"`
-		SmbPass  string          `json:"smb_pass"`
-		SysRoot  string          `json:"sys_root"`
-		Volumes  json.RawMessage `json:"volumes"`
-		APIAddr  string          `json:"api_addr"`
-		APIToken string          `json:"api_token"`
+		Name     *string `json:"name"`
+		SmbHost  *string `json:"smb_host"`
+		SmbUser  *string `json:"smb_user"`
+		SmbPass  *string `json:"smb_pass"`
+		SysRoot  *string `json:"sys_root"`
+		APIAddr  *string `json:"api_addr"`
+		APIToken *string `json:"api_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 	_, err := h.db.ExecContext(r.Context(), `
-		UPDATE servers SET name=?, smb_host=?, smb_user=?, smb_pass=?,
-		       sys_root=?, volumes=?, api_addr=?, api_token=?, updated_at=NOW()
+		UPDATE servers SET
+		    name=COALESCE(?,name), smb_host=COALESCE(?,smb_host),
+		    smb_user=COALESCE(?,smb_user), smb_pass=COALESCE(?,smb_pass),
+		    sys_root=COALESCE(?,sys_root), api_addr=COALESCE(?,api_addr),
+		    api_token=COALESCE(?,api_token), updated_at=NOW()
 		WHERE server_id=?`,
 		body.Name, body.SmbHost, body.SmbUser, body.SmbPass,
-		body.SysRoot, nullJSON(body.Volumes),
-		nullStr(body.APIAddr), nullStr(body.APIToken), id,
+		body.SysRoot, body.APIAddr, body.APIToken, id,
 	)
 	if err != nil {
 		jsonError(w, "update failed: "+err.Error(), http.StatusInternalServerError)
