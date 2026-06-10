@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 // maxBizFiles caps how many files a single (multi-)part-number ZIP may contain.
@@ -264,7 +265,21 @@ func (h *BizHandler) mergePDF(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(tmp.Name())
 	tmp.Close()
 
-	if err := api.MergeCreateFile(localPaths, tmp.Name(), false, nil); err != nil {
+	// Skip PDFs that can't be parsed (some source files are corrupt) so one bad
+	// file doesn't fail the whole merge.
+	conf := model.NewDefaultConfiguration()
+	conf.ValidationMode = model.ValidationRelaxed
+	var valid []string
+	for _, lp := range localPaths {
+		if api.ValidateFile(lp, conf) == nil {
+			valid = append(valid, lp)
+		}
+	}
+	if len(valid) == 0 {
+		jsonError(w, "这些料号的 PDF 均无法解析（可能损坏）", http.StatusUnprocessableEntity)
+		return
+	}
+	if err := api.MergeCreateFile(valid, tmp.Name(), false, conf); err != nil {
 		jsonError(w, "merge failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
