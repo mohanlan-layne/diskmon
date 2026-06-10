@@ -16,5 +16,8 @@ func buildRules(cfg *config.ClientConfig) bizrule.Registry {
 		"drawings": &bizrule.DrawingsRule{Root: `D:\drawings\`},
 		// CNC 程式目录：从料号文件夹名提取业务 ID（见 internal/bizrule/partnumber.go）。
 		"partnumber": bizrule.PartNumberRule{},
+		// 图档库（东莞）：从文件名提取料号，移植老 DC FileMon GenerateFNumber
+		// （见 internal/bizrule/filename.go）。
+		"filename": bizrule.FileNameRule{},
 	}
 }
