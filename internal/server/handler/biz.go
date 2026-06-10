@@ -57,20 +57,17 @@ func (h *BizHandler) files(w http.ResponseWriter, r *http.Request) {
 	bizKey := chi.URLParam(r, "biz_key")
 	exts := normExts(r.URL.Query().Get("ext"))
 
-	folder, _ := bizFolder(r.Context(), h.db, serverID, bizKey)
-
-	q := "SELECT id, path, COALESCE(ext,''), size, updated_at FROM file_catalog" +
-		" WHERE server_id=? AND biz_key=? AND is_dir=0"
-	args := []any{serverID, bizKey}
-	if len(exts) > 0 {
-		q += " AND LOWER(ext) IN (" + placeholders(len(exts)) + ")"
-		for _, e := range exts {
-			args = append(args, e)
-		}
+	folder, err := latestBizFolder(r.Context(), h.db, serverID, bizKey)
+	if err == sql.ErrNoRows || folder == "" {
+		jsonOK(w, []bizFile{})
+		return
 	}
-	q += " ORDER BY path LIMIT 5000"
+	if err != nil {
+		jsonError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	rows, err := h.db.QueryContext(r.Context(), q, args...)
+	rows, err := h.filesUnder(r.Context(), serverID, folder, exts)
 	if err != nil {
 		jsonError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -160,7 +157,7 @@ func (h *BizHandler) streamZip(w http.ResponseWriter, r *http.Request, serverID 
 // each entry under its part-number folder. Stops with over=true past maxBizFiles.
 func (h *BizHandler) collectBizEntries(ctx context.Context, serverID string, bizKeys, exts []string, mounts AListMounts) (entries []zipEntry, over bool, err error) {
 	for _, bk := range bizKeys {
-		folder, ferr := bizFolder(ctx, h.db, serverID, bk)
+		folder, ferr := latestBizFolder(ctx, h.db, serverID, bk)
 		if ferr == sql.ErrNoRows || folder == "" {
 			continue
 		}
@@ -168,23 +165,16 @@ func (h *BizHandler) collectBizEntries(ctx context.Context, serverID string, biz
 			return nil, false, ferr
 		}
 
-		q := "SELECT path FROM file_catalog WHERE server_id=? AND biz_key=? AND is_dir=0"
-		args := []any{serverID, bk}
-		if len(exts) > 0 {
-			q += " AND LOWER(ext) IN (" + placeholders(len(exts)) + ")"
-			for _, e := range exts {
-				args = append(args, e)
-			}
-		}
-		q += " ORDER BY path"
-
-		rows, qerr := h.db.QueryContext(ctx, q, args...)
+		rows, qerr := h.filesUnder(ctx, serverID, folder, exts)
 		if qerr != nil {
 			return nil, false, qerr
 		}
 		for rows.Next() {
-			var p string
-			if scanErr := rows.Scan(&p); scanErr != nil {
+			var id int64
+			var p, ext string
+			var size sql.NullInt64
+			var mod time.Time
+			if scanErr := rows.Scan(&id, &p, &ext, &size, &mod); scanErr != nil {
 				rows.Close()
 				return nil, false, scanErr
 			}
@@ -288,13 +278,49 @@ func (h *BizHandler) mergePDF(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, tmp.Name())
 }
 
-// bizFolder returns the part-number folder path (shortest is_dir record).
-func bizFolder(ctx context.Context, db *sql.DB, serverID, bizKey string) (string, error) {
-	var folder string
+// latestBizFolder returns the most recent part-number folder for a biz_key.
+//
+// A part number may recur in many directories (different month/operator/batch).
+// We take the file with the newest updated_at, then its part-number folder — the
+// shortest same-biz_key ancestor directory of that file (i.e. the "料号" level,
+// not its FM/ZM sub-folders). Callers then operate on just this one folder, so
+// listing/zipping reflects the latest processing and paths stay consistent.
+func latestBizFolder(ctx context.Context, db *sql.DB, serverID, bizKey string) (string, error) {
+	var latest string
 	err := db.QueryRowContext(ctx,
-		`SELECT path FROM file_catalog WHERE server_id=? AND biz_key=? AND is_dir=1
-		 ORDER BY CHAR_LENGTH(path) LIMIT 1`, serverID, bizKey).Scan(&folder)
+		`SELECT path FROM file_catalog
+		 WHERE server_id=? AND biz_key=? AND is_dir=0
+		 ORDER BY updated_at DESC LIMIT 1`, serverID, bizKey).Scan(&latest)
+	if err != nil {
+		return "", err
+	}
+	// Shortest same-biz_key directory that is a prefix of the newest file.
+	// LOCATE(CONCAT(path,'\'), latest)=1 means path+'\' starts at position 1,
+	// i.e. path is an ancestor directory of latest — no LIKE escaping needed.
+	var folder string
+	err = db.QueryRowContext(ctx,
+		`SELECT path FROM file_catalog
+		 WHERE server_id=? AND biz_key=? AND is_dir=1
+		   AND LOCATE(CONCAT(path,'\\'), ?)=1
+		 ORDER BY CHAR_LENGTH(path) LIMIT 1`, serverID, bizKey, latest).Scan(&folder)
 	return folder, err
+}
+
+// filesUnder lists the non-dir files directly within folder (recursively),
+// optionally filtered by extension. It matches by path prefix so only this one
+// part-number folder's files are returned.
+func (h *BizHandler) filesUnder(ctx context.Context, serverID, folder string, exts []string) (*sql.Rows, error) {
+	q := `SELECT id, path, COALESCE(ext,''), size, updated_at FROM file_catalog
+	      WHERE server_id=? AND is_dir=0 AND LOCATE(CONCAT(?,'\\'), path)=1`
+	args := []any{serverID, folder}
+	if len(exts) > 0 {
+		q += " AND LOWER(ext) IN (" + placeholders(len(exts)) + ")"
+		for _, e := range exts {
+			args = append(args, e)
+		}
+	}
+	q += " ORDER BY path LIMIT 5000"
+	return h.db.QueryContext(ctx, q, args...)
 }
 
 // relTo returns path relative to folder, using forward slashes.
