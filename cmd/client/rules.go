@@ -14,6 +14,7 @@ import (
 func buildRules(cfg *config.ClientConfig) bizrule.Registry {
 	return bizrule.Registry{
 		"drawings": &bizrule.DrawingsRule{Root: `D:\drawings\`},
-		// Example: "docs": &bizrule.DocsRule{Root: `E:\docs\`},
+		// CNC 程式目录：从料号文件夹名提取业务 ID（见 internal/bizrule/partnumber.go）。
+		"partnumber": bizrule.PartNumberRule{},
 	}
 }
