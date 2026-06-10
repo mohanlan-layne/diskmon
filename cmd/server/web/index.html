@@ -76,6 +76,14 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .alert{padding:10px 14px;border-radius:5px;margin-bottom:14px;font-size:13px}
 .alert.ok{background:#d1fae5;color:#065f46}
 .alert.err{background:#fee2e2;color:#991b1b}
+.apih{margin:18px 0 6px;font-size:14px;border-top:1px solid #eee;padding-top:14px}
+.apim{font-size:11px;background:#2563eb;color:#fff;padding:1px 7px;border-radius:4px;vertical-align:middle}
+.apic{background:#f3f4f6;padding:1px 6px;border-radius:4px;font-family:monospace;font-size:12px;color:#b91c1c}
+.apit{border-collapse:collapse;margin:6px 0;font-size:12px}
+.apit th,.apit td{border:1px solid #e5e7eb;padding:4px 10px;text-align:left}
+.apit th{background:#f9fafb}
+.apie{background:#1e293b;color:#e2e8f0;padding:10px 12px;border-radius:6px;font-size:12px;overflow-x:auto;white-space:pre;margin:6px 0}
+.apie .b{color:#7dd3fc}
 </style>
 </head>
 <body>
@@ -84,6 +92,7 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   <nav>
     <button class="active" onclick="showTab('servers',this)">服务器</button>
     <button onclick="showTab('files',this)">文件浏览</button>
+    <button onclick="showTab('api',this)">接口文档</button>
   </nav>
 </header>
 <main>
@@ -156,6 +165,54 @@ td.name .path-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- ══ 接口文档 tab ════════════════════════════════ -->
+<div id="tab-api" class="tab">
+  <div class="toolbar"><h2 style="margin:0">文件服务接口（供外部系统调用）</h2></div>
+  <div style="font-size:13px;line-height:1.7;color:#374151;max-width:960px">
+    <p>以下 HTTP 接口供 ERP/MES 等外部系统调用，<b>无需鉴权</b>（内网信任）。
+       Base 地址：<code id="api-base" class="apic"></code>，返回均为 JSON（下载/打包为文件流）。</p>
+
+    <h3 class="apih">1. 查询文件　<span class="apim">GET</span> <code class="apic">/api/files</code></h3>
+    <p>按条件查询文件目录。参数（均可选，query string）：</p>
+    <table class="apit">
+      <tr><th>参数</th><th>说明</th></tr>
+      <tr><td>server_id</td><td>服务器 ID，如 <code>cnc-10hao</code></td></tr>
+      <tr><td>biz_key</td><td>业务料号，如 <code>0931-5000013</code></td></tr>
+      <tr><td>ext</td><td>扩展名精确匹配，如 <code>.NC</code></td></tr>
+      <tr><td>path_prefix</td><td>路径前缀匹配</td></tr>
+      <tr><td>is_dir</td><td><code>true</code>/<code>false</code> 仅目录/仅文件</td></tr>
+      <tr><td>limit / offset</td><td>分页，limit 默认 100、上限 1000</td></tr>
+    </table>
+    <pre class="apie">curl "<span class="b"></span>/api/files?server_id=cnc-10hao&biz_key=0931-5000013"</pre>
+
+    <h3 class="apih">2. 在线预览　<span class="apim">GET</span> <code class="apic">/api/files/preview</code></h3>
+    <p>参数 <code>server_id</code>、<code>path</code>（文件完整路径）。302 跳转到 kkFileView 预览页，浏览器直接打开即可。</p>
+    <pre class="apie">&lt;a href="<span class="b"></span>/api/files/preview?server_id=cnc-10hao&path=E:\...\x.pdf" target="_blank"&gt;预览&lt;/a&gt;</pre>
+
+    <h3 class="apih">3. 单文件下载　<span class="apim">GET</span> <code class="apic">/api/files/dl</code></h3>
+    <p>参数 <code>server_id</code>、<code>path</code>。302 跳转到 AList 直链下载。</p>
+    <pre class="apie"><span class="b"></span>/api/files/dl?server_id=cnc-10hao&path=E:\...\x.NC</pre>
+
+    <h3 class="apih">4. 多文件/目录打包　<span class="apim">POST</span> <code class="apic">/api/files/zip</code></h3>
+    <p>请求体 JSON：<code>{"server_id":"...","paths":["...","..."]}</code>。paths 可为文件或目录（目录递归），返回 ZIP 流。<b>总文件数上限 100</b>，超出返回 400。</p>
+    <pre class="apie">curl -X POST "<span class="b"></span>/api/files/zip" \
+  -H "Content-Type: application/json" \
+  -d '{"server_id":"cnc-10hao","paths":["E:\\...\\dir1","E:\\...\\a.NC"]}' \
+  -o pack.zip</pre>
+
+    <h3 class="apih">5. 按料号查文件　<span class="apim">GET</span> <code class="apic">/api/biz/{server_id}/{biz_key}/files</code></h3>
+    <p>返回该料号下全部文件（含目录），无需知道具体路径。</p>
+    <pre class="apie">curl "<span class="b"></span>/api/biz/cnc-10hao/0931-5000013/files"</pre>
+
+    <h3 class="apih">6. 按料号打包下载　<span class="apim">GET</span> <code class="apic">/api/biz/{server_id}/{biz_key}/zip</code></h3>
+    <p>把该料号文件夹下所有文件打成 <code>&lt;料号&gt;.zip</code>（保留目录结构），浏览器可直接下载。<b>文件数上限 100</b>。</p>
+    <pre class="apie">&lt;a href="<span class="b"></span>/api/biz/cnc-10hao/0931-5000013/zip"&gt;下载料号&lt;/a&gt;</pre>
+
+    <h3 class="apih">辅助　<span class="apim">GET</span> <code class="apic">/api/servers</code></h3>
+    <p>列出所有服务器（含 server_id、名称、在线信息），供选择 server_id。</p>
   </div>
 </div>
 
@@ -257,6 +314,11 @@ function showTab(name, btn) {
   document.getElementById('tab-' + name).classList.add('active');
   btn.classList.add('active');
   if (name === 'files') loadSidebar();
+  if (name === 'api') {
+    const base = location.origin;
+    document.getElementById('api-base').textContent = base;
+    document.querySelectorAll('#tab-api .b').forEach(e => e.textContent = base);
+  }
 }
 
 // ── 通用请求 ──────────────────────────────────────

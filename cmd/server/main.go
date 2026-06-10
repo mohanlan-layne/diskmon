@@ -73,6 +73,7 @@ func main() {
 	dl := handler.NewDownloadHandler(db, cfg.SmbMounts)
 	dl.Register(r)
 	handler.NewTransformHandler(dl).Register(r)
+	handler.NewBizHandler(db, dl).Register(r)
 	kkURL := cfg.KkFileViewPublicURL // browser-reachable; falls back to internal
 	if kkURL == "" {
 		kkURL = cfg.KkFileViewURL
