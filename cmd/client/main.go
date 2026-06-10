@@ -434,13 +434,29 @@ func buildLogger(logPath string) *slog.Logger {
 		slog.Default().Warn("cannot open log file, logging to stdout only", "err", err, "path", logPath)
 		return slog.Default()
 	}
-	w := io.MultiWriter(os.Stdout, f)
+	// The log file is the source of truth and must always be written. Stdout is
+	// best-effort: when running as a Windows service there is no console, so
+	// writing to os.Stdout errors — and since io.MultiWriter is strictly serial
+	// and aborts on the first writer's error, a naive MultiWriter(os.Stdout, f)
+	// would silently stop writing the file too. Wrap stdout so its errors are
+	// swallowed and never block the file write.
+	w := io.MultiWriter(bestEffortWriter{os.Stdout}, f)
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			return a
 		},
 	}))
+}
+
+// bestEffortWriter forwards writes to the underlying writer but never reports an
+// error, so a failing/invalid stdout (e.g. a Windows service with no console)
+// cannot abort an io.MultiWriter and stop the file log from being written.
+type bestEffortWriter struct{ w io.Writer }
+
+func (b bestEffortWriter) Write(p []byte) (int, error) {
+	_, _ = b.w.Write(p)
+	return len(p), nil
 }
 
 func runAsService(cfg *config.ClientConfig, rescan, dryRun bool, logger *slog.Logger) {
