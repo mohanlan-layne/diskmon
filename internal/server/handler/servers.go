@@ -197,8 +197,9 @@ func (h *ServersHandler) alistPing(w http.ResponseWriter, r *http.Request) {
 
 func (h *ServersHandler) list(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, server_id, name, smb_host, smb_user, sys_root, volumes,
-		        COALESCE(api_addr,''), alist_urls, created_at, updated_at
+		`SELECT id, server_id, COALESCE(name,''), COALESCE(smb_host,''), COALESCE(smb_user,''),
+		        COALESCE(sys_root,''), volumes, COALESCE(api_addr,''), alist_urls,
+		        created_at, updated_at
 		 FROM servers ORDER BY id`)
 	if err != nil {
 		jsonError(w, "query failed", http.StatusInternalServerError)
@@ -278,8 +279,9 @@ func (h *ServersHandler) get(w http.ResponseWriter, r *http.Request) {
 	var s ServerRow
 	var volumesBytes, alistURLsBytes []byte
 	err := h.db.QueryRowContext(r.Context(),
-		`SELECT id, server_id, name, smb_host, smb_user, sys_root, volumes,
-		        COALESCE(api_addr,''), alist_urls, created_at, updated_at
+		`SELECT id, server_id, COALESCE(name,''), COALESCE(smb_host,''), COALESCE(smb_user,''),
+		        COALESCE(sys_root,''), volumes, COALESCE(api_addr,''), alist_urls,
+		        created_at, updated_at
 		 FROM servers WHERE server_id=?`, id,
 	).Scan(&s.ID, &s.ServerID, &s.Name, &s.SmbHost, &s.SmbUser,
 		&s.SysRoot, &volumesBytes, &s.APIAddr, &alistURLsBytes,
