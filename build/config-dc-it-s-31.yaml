@@ -1,0 +1,40 @@
+# diskmon client 配置 —— 192.168.1.31 成品代码专案图档库
+#
+# 跑在 192.168.1.31 本机，通过 NTFS USN Journal 监控 E 盘，
+# 只监控成品代码专案两个目录（东莞 + 浙江），
+# 料号从文件名提取（FileNameRule，见 internal/bizrule/filename.go）。
+#
+# SMB 共享：\\192.168.1.31\FILE2 → E:\DC-IT-S-31\FILE2
+
+# diskmon 数据库（从 192.168.1.31 直连 192.168.1.190）
+postgres:
+  dsn: "yudao:Yudao@2025@tcp(192.168.1.190:3306)/diskmon?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai"
+
+server_id: "dc-it-s-31"
+name: "东莞成品代码图档库（DC-IT-S-31）"
+
+smb_user: "EASTWINSZ\\zjit"
+
+checkpoint_path: "D:\\diskmon\\checkpoints"
+log_path:        "D:\\diskmon\\logs\\client.log"
+
+api:
+  listen: ":19090"
+  token:  "7e04531817ea54c9a00fe42a59bf38ee"
+
+poll_interval_ms:          1000
+rename_window_ms:           500
+path_resolver_cache_size: 200000
+
+volumes:
+  - name: "E:"
+    journal_size: 134217728   # 128 MB
+    biz_rule: "filename"
+
+filters:
+  include_dirs:
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案"
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案(浙江)"
+  exclude_dirs: []
+  extensions: []   # 空 = 所有文件
+  events:    []    # 空 = 所有事件
