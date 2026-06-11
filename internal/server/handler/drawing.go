@@ -412,10 +412,10 @@ func winParentDir(path string) string {
 //   - native vector text (crisp at any zoom, never rasterised/blurry)
 //   - embedded NotoSansSC-Regular for Chinese glyphs
 //   - 10pt, red (#FF0000), fully opaque
-//   - pos:bl off:200 550 → baseline-left anchored at x=200, y=550 from the
-//     bottom-left of every page (matches iText addText(text, 200, 550), and is
-//     robust to non-A4 page sizes since it measures from the bottom).
-const drawingWatermarkDesc = "scale:1.0 abs, pos:bl, off:200 550, font:" + cjkFontName +
+//   - pos:bl off:80 500 → baseline-left anchored at x=80, y=500 from the
+//     bottom-left of every page (robust to non-A4 page sizes since it measures
+//     from the bottom).
+const drawingWatermarkDesc = "scale:1.0 abs, pos:bl, off:80 500, font:" + cjkFontName +
 	", points:10, fillcolor:#FF0000, opacity:1.0, rotation:0"
 
 // annotatePages stamps text onto every page of srcPath using pdfcpu's native
