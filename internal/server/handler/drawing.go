@@ -13,7 +13,6 @@ package handler
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -22,12 +21,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,34 +33,47 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
 )
 
 //go:embed assets/NotoSansSC-Regular.ttf
 var notoSansSCFont []byte
 
-// parsedFace is the CJK font face, initialised once.
+// cjkFontName is the PostScript name the embedded font registers as in pdfcpu.
+const cjkFontName = "NotoSansSC-Regular"
+
+// cjkFontOnce guards one-time installation of the embedded CJK font into
+// pdfcpu's user-font registry so TextWatermark can embed it for Chinese text.
 var (
-	cjkFaceOnce sync.Once
-	cjkFace     font.Face
-	cjkFaceErr  error
+	cjkFontOnce sync.Once
+	cjkFontErr  error
 )
 
-func initCJKFace() (font.Face, error) {
-	cjkFaceOnce.Do(func() {
-		f, err := opentype.Parse(notoSansSCFont)
+// initCJKFont installs the embedded NotoSansSC-Regular into pdfcpu's user font
+// dir (idempotent). It first ensures the default configuration is loaded so
+// font.UserFontDir is set, then writes the TTF to a temp file and installs it.
+func initCJKFont() error {
+	cjkFontOnce.Do(func() {
+		// Loading the default config sets font.UserFontDir, required by InstallFonts.
+		_ = model.NewDefaultConfiguration()
+
+		dir, err := os.MkdirTemp("", "diskmon-fonts-*")
 		if err != nil {
-			cjkFaceErr = err
+			cjkFontErr = err
 			return
 		}
-		cjkFace, cjkFaceErr = opentype.NewFace(f, &opentype.FaceOptions{
-			Size: 10,
-			DPI:  96,
-		})
+		defer os.RemoveAll(dir)
+
+		fontPath := filepath.Join(dir, cjkFontName+".ttf")
+		if err := os.WriteFile(fontPath, notoSansSCFont, 0o644); err != nil {
+			cjkFontErr = err
+			return
+		}
+		if err := api.InstallFonts([]string{fontPath}); err != nil {
+			cjkFontErr = err
+			return
+		}
 	})
-	return cjkFace, cjkFaceErr
+	return cjkFontErr
 }
 
 // DrawingHandler serves the 5 drawing-library routes.
@@ -397,65 +407,24 @@ func winParentDir(path string) string {
 
 // --- per-page PDF annotation ---
 
-// renderTextPNG renders text into a transparent PNG using the embedded CJK font.
-// Returns PNG bytes.
-func renderTextPNG(text string) ([]byte, error) {
-	face, err := initCJKFace()
-	if err != nil {
-		return nil, fmt.Errorf("font face: %w", err)
-	}
+// watermarkDesc is the pdfcpu TextWatermark descriptor, verified to reproduce
+// the original PrintServer.jar stamp:
+//   - native vector text (crisp at any zoom, never rasterised/blurry)
+//   - embedded NotoSansSC-Regular for Chinese glyphs
+//   - 10pt, red (#FF0000), fully opaque
+//   - pos:bl off:200 550 → baseline-left anchored at x=200, y=550 from the
+//     bottom-left of every page (matches iText addText(text, 200, 550), and is
+//     robust to non-A4 page sizes since it measures from the bottom).
+const drawingWatermarkDesc = "scale:1.0 abs, pos:bl, off:200 550, font:" + cjkFontName +
+	", points:10, fillcolor:#FF0000, opacity:1.0, rotation:0"
 
-	d := &font.Drawer{Face: face}
-	adv := d.MeasureString(text)
-	w := adv.Ceil() + 8
-	h := 18 // ~10pt at 96dpi + leading
-
-	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	// transparent background
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.SetNRGBA(x, y, color.NRGBA{0, 0, 0, 0})
-		}
-	}
-	d.Dst = img
-	d.Src = image.NewUniform(color.NRGBA{0, 0, 0, 255})
-	d.Dot = fixed.P(4, 13) // baseline ~13px from top
-	d.DrawString(text)
-
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// annotatePages stamps text onto every page of srcPath using pdfcpu, writes the
-// result to a new temp file, and returns its path with a cleanup function.
-//
-// Renders text to a transparent PNG via the embedded NotoSansSC-Regular font,
-// then stamps the PNG as an image watermark — this bypasses pdfcpu's font
-// subsystem entirely so CJK text always renders correctly.
-//
-// Position matches the original PrintServer.jar: x=200, y=550 on A4 (upper-left area).
+// annotatePages stamps text onto every page of srcPath using pdfcpu's native
+// text watermark, writes the result to a new temp file, and returns its path
+// with a cleanup function.
 func annotatePages(srcPath, text string, conf *model.Configuration) (string, func(), error) {
-	pngData, err := renderTextPNG(text)
-	if err != nil {
-		return "", nil, err
+	if err := initCJKFont(); err != nil {
+		return "", nil, fmt.Errorf("CJK font init: %w", err)
 	}
-
-	// Write PNG to temp file (pdfcpu ImageWatermark needs a file path)
-	pngTmp, err := os.CreateTemp("", "diskmon-wm-*.png")
-	if err != nil {
-		return "", nil, err
-	}
-	pngName := pngTmp.Name()
-	if _, err := pngTmp.Write(pngData); err != nil {
-		pngTmp.Close()
-		os.Remove(pngName)
-		return "", nil, err
-	}
-	pngTmp.Close()
-	defer os.Remove(pngName)
 
 	tmp, err := os.CreateTemp("", "diskmon-ann-*.pdf")
 	if err != nil {
@@ -465,14 +434,10 @@ func annotatePages(srcPath, text string, conf *model.Configuration) (string, fun
 	tmp.Close()
 	cleanup := func() { os.Remove(tmpName) }
 
-	// scale:1.0 abs → image displayed at its natural pixel size (1px ≈ 1pt at 96dpi).
-	// pos:tl, off:200 -270 → places the stamp ≈ x=200, y=572 from bottom of A4 (842pt tall).
-	wm, err := api.ImageWatermark(pngName,
-		"pos:tl, off:200 -270, scale:1.0 abs, rotation:0, opacity:1.0",
-		true, true, types.POINTS)
+	wm, err := api.TextWatermark(text, drawingWatermarkDesc, true, true, types.POINTS)
 	if err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("ImageWatermark: %w", err)
+		return "", nil, fmt.Errorf("TextWatermark: %w", err)
 	}
 	if err := api.AddWatermarksFile(srcPath, tmpName, nil, wm, conf); err != nil {
 		cleanup()
