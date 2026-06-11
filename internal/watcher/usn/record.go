@@ -66,7 +66,9 @@ func WindowsFileTimeToTime(ft int64) time.Time {
 func ToFileEntry(serverID, volume, path string, isDir bool, size *int64, updatedAt time.Time) model.FileEntry {
 	ext := ""
 	if !isDir {
-		ext = strings.ToLower(filepath.Ext(path))
+		if e := strings.ToLower(filepath.Ext(path)); len(e) <= 20 {
+			ext = e
+		}
 	}
 	return model.FileEntry{
 		ServerID:  serverID,

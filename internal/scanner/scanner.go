@@ -212,7 +212,9 @@ func (s *Scanner) scanVolume(ctx context.Context, vol config.VolumeConfig) error
 func (s *Scanner) buildEntry(path string, isDir bool, size *int64, volume string, modTime time.Time, rule bizrule.VolumeRule) model.FileEntry {
 	ext := ""
 	if !isDir {
-		ext = strings.ToLower(filepath.Ext(path))
+		if e := strings.ToLower(filepath.Ext(path)); len(e) <= 20 {
+			ext = e
+		}
 	}
 	return model.FileEntry{
 		ServerID:  s.serverID,
