@@ -16,12 +16,15 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +34,38 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
+
+//go:embed assets/NotoSansSC-Regular.ttf
+var notoSansSCFont []byte
+
+// cjkFontDir holds the temp directory where the bundled CJK font is installed
+// for pdfcpu. Initialised once on first use.
+var (
+	cjkFontOnce sync.Once
+	cjkFontDir  string
+	cjkFontErr  error
+)
+
+func initCJKFont() (string, error) {
+	cjkFontOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "diskmon-fonts-*")
+		if err != nil {
+			cjkFontErr = err
+			return
+		}
+		fontPath := filepath.Join(dir, "NotoSansSC-Regular.ttf")
+		if err := os.WriteFile(fontPath, notoSansSCFont, 0o644); err != nil {
+			cjkFontErr = err
+			return
+		}
+		if err := api.InstallFonts([]string{fontPath}); err != nil {
+			cjkFontErr = err
+			return
+		}
+		cjkFontDir = dir
+	})
+	return cjkFontDir, cjkFontErr
+}
 
 // DrawingHandler serves the 5 drawing-library routes.
 type DrawingHandler struct {
@@ -365,8 +400,17 @@ func winParentDir(path string) string {
 
 // annotatePages stamps text onto every page of srcPath using pdfcpu, writes the
 // result to a new temp file, and returns its path with a cleanup function.
-// Positioned bottom-right in a small font so it doesn't obscure drawings.
+//
+// Matches the original PrintServer.jar behaviour:
+//   - NotoSansSC-Regular (CJK-capable, embedded in binary)
+//   - 10pt, fully opaque black
+//   - Anchored top-left with offset (200, -292) ≈ x=200 y=550 on A4
+//     (equivalent to iText showTextAligned(ALIGN_CENTER, text, 200, 550))
 func annotatePages(srcPath, text string, conf *model.Configuration) (string, func(), error) {
+	if _, err := initCJKFont(); err != nil {
+		return "", nil, fmt.Errorf("CJK font init: %w", err)
+	}
+
 	tmp, err := os.CreateTemp("", "diskmon-ann-*.pdf")
 	if err != nil {
 		return "", nil, err
@@ -377,7 +421,7 @@ func annotatePages(srcPath, text string, conf *model.Configuration) (string, fun
 	cleanup := func() { os.Remove(tmpName) }
 
 	wm, err := api.TextWatermark(text,
-		"pos:br, font:Helvetica, points:9, opacity:0.8, rotation:0",
+		"pos:tl, off:200 -292, font:NotoSansSC-Regular, points:10, opacity:1.0, rotation:0",
 		true, true, types.POINTS)
 	if err != nil {
 		cleanup()
