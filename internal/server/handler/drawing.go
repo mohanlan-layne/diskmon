@@ -13,6 +13,7 @@ package handler
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -21,10 +22,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,38 +36,34 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/math/fixed"
 )
 
 //go:embed assets/NotoSansSC-Regular.ttf
 var notoSansSCFont []byte
 
-// cjkFontDir holds the temp directory where the bundled CJK font is installed
-// for pdfcpu. Initialised once on first use.
+// parsedFace is the CJK font face, initialised once.
 var (
-	cjkFontOnce sync.Once
-	cjkFontDir  string
-	cjkFontErr  error
+	cjkFaceOnce sync.Once
+	cjkFace     font.Face
+	cjkFaceErr  error
 )
 
-func initCJKFont() (string, error) {
-	cjkFontOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "diskmon-fonts-*")
+func initCJKFace() (font.Face, error) {
+	cjkFaceOnce.Do(func() {
+		f, err := opentype.Parse(notoSansSCFont)
 		if err != nil {
-			cjkFontErr = err
+			cjkFaceErr = err
 			return
 		}
-		fontPath := filepath.Join(dir, "NotoSansSC-Regular.ttf")
-		if err := os.WriteFile(fontPath, notoSansSCFont, 0o644); err != nil {
-			cjkFontErr = err
-			return
-		}
-		if err := api.InstallFonts([]string{fontPath}); err != nil {
-			cjkFontErr = err
-			return
-		}
-		cjkFontDir = dir
+		cjkFace, cjkFaceErr = opentype.NewFace(f, &opentype.FaceOptions{
+			Size: 10,
+			DPI:  96,
+		})
 	})
-	return cjkFontDir, cjkFontErr
+	return cjkFace, cjkFaceErr
 }
 
 // DrawingHandler serves the 5 drawing-library routes.
@@ -398,18 +397,65 @@ func winParentDir(path string) string {
 
 // --- per-page PDF annotation ---
 
+// renderTextPNG renders text into a transparent PNG using the embedded CJK font.
+// Returns PNG bytes.
+func renderTextPNG(text string) ([]byte, error) {
+	face, err := initCJKFace()
+	if err != nil {
+		return nil, fmt.Errorf("font face: %w", err)
+	}
+
+	d := &font.Drawer{Face: face}
+	adv := d.MeasureString(text)
+	w := adv.Ceil() + 8
+	h := 18 // ~10pt at 96dpi + leading
+
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	// transparent background
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{0, 0, 0, 0})
+		}
+	}
+	d.Dst = img
+	d.Src = image.NewUniform(color.NRGBA{0, 0, 0, 255})
+	d.Dot = fixed.P(4, 13) // baseline ~13px from top
+	d.DrawString(text)
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // annotatePages stamps text onto every page of srcPath using pdfcpu, writes the
 // result to a new temp file, and returns its path with a cleanup function.
 //
-// Matches the original PrintServer.jar behaviour:
-//   - NotoSansSC-Regular (CJK-capable, embedded in binary)
-//   - 10pt, fully opaque black
-//   - Anchored top-left with offset (200, -292) ≈ x=200 y=550 on A4
-//     (equivalent to iText showTextAligned(ALIGN_CENTER, text, 200, 550))
+// Renders text to a transparent PNG via the embedded NotoSansSC-Regular font,
+// then stamps the PNG as an image watermark — this bypasses pdfcpu's font
+// subsystem entirely so CJK text always renders correctly.
+//
+// Position matches the original PrintServer.jar: x=200, y=550 on A4 (upper-left area).
 func annotatePages(srcPath, text string, conf *model.Configuration) (string, func(), error) {
-	if _, err := initCJKFont(); err != nil {
-		return "", nil, fmt.Errorf("CJK font init: %w", err)
+	pngData, err := renderTextPNG(text)
+	if err != nil {
+		return "", nil, err
 	}
+
+	// Write PNG to temp file (pdfcpu ImageWatermark needs a file path)
+	pngTmp, err := os.CreateTemp("", "diskmon-wm-*.png")
+	if err != nil {
+		return "", nil, err
+	}
+	pngName := pngTmp.Name()
+	if _, err := pngTmp.Write(pngData); err != nil {
+		pngTmp.Close()
+		os.Remove(pngName)
+		return "", nil, err
+	}
+	pngTmp.Close()
+	defer os.Remove(pngName)
 
 	tmp, err := os.CreateTemp("", "diskmon-ann-*.pdf")
 	if err != nil {
@@ -417,19 +463,20 @@ func annotatePages(srcPath, text string, conf *model.Configuration) (string, fun
 	}
 	tmpName := tmp.Name()
 	tmp.Close()
-
 	cleanup := func() { os.Remove(tmpName) }
 
-	wm, err := api.TextWatermark(text,
-		"pos:tl, off:200 -292, font:NotoSansSC-Regular, points:10, opacity:1.0, rotation:0",
+	// scale:1.0 abs → image displayed at its natural pixel size (1px ≈ 1pt at 96dpi).
+	// pos:tl, off:200 -270 → places the stamp ≈ x=200, y=572 from bottom of A4 (842pt tall).
+	wm, err := api.ImageWatermark(pngName,
+		"pos:tl, off:200 -270, scale:1.0 abs, rotation:0, opacity:1.0",
 		true, true, types.POINTS)
 	if err != nil {
 		cleanup()
-		return "", nil, err
+		return "", nil, fmt.Errorf("ImageWatermark: %w", err)
 	}
 	if err := api.AddWatermarksFile(srcPath, tmpName, nil, wm, conf); err != nil {
 		cleanup()
-		return "", nil, err
+		return "", nil, fmt.Errorf("AddWatermarks: %w", err)
 	}
 	return tmpName, cleanup, nil
 }
