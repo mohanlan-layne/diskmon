@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -102,7 +103,10 @@ func (h *ClientsHandler) clientURL(r *http.Request, serverID, path string) (stri
 	if err != nil || apiAddr == "" {
 		return "", "", fmt.Errorf("client not found or api_addr not set for %s", serverID)
 	}
-	return "http://" + apiAddr + path, apiToken, nil
+	if !strings.HasPrefix(apiAddr, "http://") && !strings.HasPrefix(apiAddr, "https://") {
+		apiAddr = "http://" + apiAddr
+	}
+	return apiAddr + path, apiToken, nil
 }
 
 func (h *ClientsHandler) proxy(w http.ResponseWriter, r *http.Request, method, targetURL, token string, body io.Reader) {
