@@ -15,8 +15,8 @@ name: "东莞成品代码图档库（DC-IT-S-31）"
 
 smb_user: "EASTWINSZ\\zjit"
 
-checkpoint_path: "D:\\diskmon\\checkpoints"
-log_path:        "D:\\diskmon\\logs\\client.log"
+checkpoint_path: "C:\\diskmon\\checkpoints"
+log_path:        "C:\\diskmon\\logs\\client.log"
 
 api:
   listen: ":19090"
@@ -35,6 +35,18 @@ filters:
   include_dirs:
     - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案"
     - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案(浙江)"
-  exclude_dirs: []
+  exclude_dirs:
+    # 对应老 30.3: 新系统成品代码专案(东莞)/101~105（分类目录，不监控）
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\101  -  3C类成品代码"
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\103  -  半导体类成品代码"
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\104  -  汽车类成品代码"
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\105  -  其他类成品代码"
+    # 对应老 30.3: 线材BOM图库/未分类、变更图档（无效/归档文件）
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\线材BOM图库\\未分类"
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\线材BOM图库\\变更图档"
+    # 对应老 30.3: 线材BOM图库(新)/未匹配
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案\\线材BOM图库(新)\\未匹配"
+    # 对应老 30.3: 新系统成品代码专案/pdf-center（浙江侧的 PDF 中心，只存生成件）
+    - "E:\\DC-IT-S-31\\FILE2\\产品专案资料\\新系统成品代码专案(浙江)\\pdf-center"
   extensions: []   # 空 = 所有文件
   events:    []    # 空 = 所有事件

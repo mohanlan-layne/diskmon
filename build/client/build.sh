@@ -16,25 +16,23 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 echo "-> 复制安装脚本 ..."
 cp scripts/install-client.ps1 "$OUT/install-client.ps1"
 
-# 只在 config.yaml 不存在时才从模板生成，已有的不覆盖
-if [ ! -f "$OUT/config.yaml" ]; then
-  cp scripts/config.template.yaml "$OUT/config.yaml"
-fi
-
 echo ""
 echo "==========================================================="
 echo "  构建完成: $OUT/"
 echo ""
 echo "  dist/diskmon-client/"
 echo "    diskmon-client.exe   <- 主程序"
-echo "    config.yaml          <- 配置文件（需按实际修改）"
 echo "    install-client.ps1   <- 安装为 Windows 服务脚本"
 echo ""
+echo "  config 文件在 build/ 目录："
+echo "    build/config-template.yaml     <- 新机器模板"
+echo "    build/config-dc-it-s-31.yaml   <- 东莞成品代码图档库"
+echo "    build/config-partnumber.yaml   <- CNC 10号厂房"
+echo ""
 echo "  部署步骤："
-echo "  1. 修改 config.yaml（server_id / name / smb_user / volumes / include_dirs）"
-echo "  2. 将整个目录复制到目标 Windows 机器 C:\\diskmon\\"
+echo "  1. 从 build/ 取对应 config（或从 config-template.yaml 新建）"
+echo "  2. 将 exe + config + install-client.ps1 复制到目标机器 C:\\diskmon\\"
 echo "  3. 以管理员身份运行 PowerShell："
 echo "     cd C:\\diskmon"
-echo "     .\\install-client.ps1 -Rescan"
-echo "  4. 复制启动输出中的「注册信息 JSON」到 diskmon 管理界面"
+echo "     .\\diskmon-client.exe --config C:\\diskmon\\<config>.yaml --install --rescan"
 echo "==========================================================="
