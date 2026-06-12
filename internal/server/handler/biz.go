@@ -289,18 +289,22 @@ func latestBizFolder(ctx context.Context, db *sql.DB, serverID, bizKey string) (
 	var latest string
 	err := db.QueryRowContext(ctx,
 		`SELECT path FROM file_catalog
-		 WHERE server_id=? AND biz_key=? AND is_dir=0
+		 WHERE server_id=? AND biz_key=? AND is_dir=0 AND size>0
 		 ORDER BY updated_at DESC LIMIT 1`, serverID, bizKey).Scan(&latest)
 	if err != nil {
 		return "", err
 	}
-	// Shortest same-biz_key directory that is a prefix of the newest file.
-	// LOCATE(CONCAT(path,'\'), latest)=1 means path+'\' starts at position 1,
-	// i.e. path is an ancestor directory of latest — no LIKE escaping needed.
+	// Shortest same-biz_key path that is an ancestor directory of the newest file.
+	// We deliberately do NOT filter on is_dir: a client bug records some
+	// directories created via rename as is_dir=0 (the directory flag is lost when
+	// an unpaired rename is flushed as a create), so relying on is_dir would miss
+	// those part-number folders. LOCATE(CONCAT(path,'\'), latest)=1 means path+'\'
+	// is a prefix of the file path, which can only hold for a real ancestor
+	// directory — so this stays correct regardless of the (possibly wrong) is_dir.
 	var folder string
 	err = db.QueryRowContext(ctx,
 		`SELECT path FROM file_catalog
-		 WHERE server_id=? AND biz_key=? AND is_dir=1
+		 WHERE server_id=? AND biz_key=?
 		   AND LOCATE(CONCAT(path,'\\'), ?)=1
 		 ORDER BY CHAR_LENGTH(path) LIMIT 1`, serverID, bizKey, latest).Scan(&folder)
 	return folder, err
@@ -310,8 +314,10 @@ func latestBizFolder(ctx context.Context, db *sql.DB, serverID, bizKey string) (
 // optionally filtered by extension. It matches by path prefix so only this one
 // part-number folder's files are returned.
 func (h *BizHandler) filesUnder(ctx context.Context, serverID, folder string, exts []string) (*sql.Rows, error) {
+	// size>0 excludes directories that the client mis-recorded as is_dir=0 (they
+	// carry a NULL/0 size), so a mislabeled sub-folder is never packed as a file.
 	q := `SELECT id, path, COALESCE(ext,''), size, updated_at FROM file_catalog
-	      WHERE server_id=? AND is_dir=0 AND LOCATE(CONCAT(?,'\\'), path)=1`
+	      WHERE server_id=? AND is_dir=0 AND size>0 AND LOCATE(CONCAT(?,'\\'), path)=1`
 	args := []any{serverID, folder}
 	if len(exts) > 0 {
 		q += " AND LOWER(ext) IN (" + placeholders(len(exts)) + ")"

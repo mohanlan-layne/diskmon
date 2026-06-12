@@ -26,6 +26,7 @@ import (
 type pendingRename struct {
 	path      string
 	timestamp time.Time
+	isDir     bool
 }
 
 // Monitor watches a single NTFS volume via USN Journal and writes changes to the catalog.
@@ -235,7 +236,7 @@ func (m *Monitor) processRecord(
 
 	if IsRenameOld(rec.Reason) {
 		if path != "" {
-			pendingOld[rec.FRN] = pendingRename{path: path, timestamp: occuredAt}
+			pendingOld[rec.FRN] = pendingRename{path: path, timestamp: occuredAt, isDir: isDir}
 		}
 		return nil
 	}
@@ -256,7 +257,7 @@ func (m *Monitor) processRecord(
 			}
 			return nil
 		}
-		pendingNew[rec.FRN] = pendingRename{path: path, timestamp: occuredAt}
+		pendingNew[rec.FRN] = pendingRename{path: path, timestamp: occuredAt, isDir: isDir}
 		if old, ok := pendingOld[rec.FRN]; ok {
 			delete(pendingOld, rec.FRN)
 			delete(pendingNew, rec.FRN)
@@ -348,6 +349,7 @@ func (m *Monitor) flushExpiredRenames(
 			evt := model.ChangeEvent{
 				EventType:  "remove",
 				Path:       r.path,
+				IsDir:      r.isDir,
 				Volume:     m.volume.Name,
 				OccurredAt: r.timestamp,
 			}
@@ -362,10 +364,14 @@ func (m *Monitor) flushExpiredRenames(
 			evt := model.ChangeEvent{
 				EventType:  "create",
 				Path:       r.path,
-				Ext:        strings.ToLower(filepath.Ext(r.path)),
+				IsDir:      r.isDir,
 				Volume:     m.volume.Name,
 				OccurredAt: r.timestamp,
 			}
+			if !r.isDir {
+				evt.Ext = strings.ToLower(filepath.Ext(r.path))
+			}
+			enrichSize(&evt)
 			if m.filter.Match(evt) {
 				events = append(events, evt)
 			}
