@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>diskmon · 登录</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.5 system-ui,sans-serif;background:#f5f6fa;color:#333;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,.08);padding:36px 32px;width:340px;max-width:92vw}
+.brand{font-size:20px;font-weight:600;letter-spacing:.5px;color:#1e2a3a;text-align:center;margin-bottom:6px}
+.sub{font-size:12px;color:#9ca3af;text-align:center;margin-bottom:24px}
+.form-row{margin-bottom:16px}
+.form-row label{display:block;font-size:12px;color:#6b7280;margin-bottom:5px;font-weight:500}
+.form-row input{width:100%;border:1px solid #d0d4de;border-radius:5px;padding:9px 11px;font-size:14px}
+.form-row input:focus{outline:2px solid #2d6cf6;border-color:#2d6cf6}
+button{width:100%;background:#2d6cf6;color:#fff;border:none;border-radius:5px;padding:10px;cursor:pointer;font-size:14px;margin-top:6px}
+button:hover{background:#1a57e0}
+button:disabled{opacity:.5;cursor:default}
+.err{background:#fee2e2;color:#991b1b;border-radius:5px;padding:9px 12px;font-size:13px;margin-bottom:16px;display:none}
+.err.show{display:block}
+</style>
+</head>
+<body>
+<form class="card" id="login-form">
+  <div class="brand">diskmon</div>
+  <div class="sub">内部管理 · 请登录</div>
+  <div class="err" id="err"></div>
+  <div class="form-row">
+    <label for="user">用户名</label>
+    <input id="user" name="user" autocomplete="username" autofocus required>
+  </div>
+  <div class="form-row">
+    <label for="password">密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+  </div>
+  <button type="submit" id="submit">登 录</button>
+</form>
+<script>
+const form = document.getElementById('login-form');
+const errBox = document.getElementById('err');
+const btn = document.getElementById('submit');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errBox.classList.remove('show');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user: document.getElementById('user').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    if (r.ok) { window.location = '/admin/'; return; }
+    const data = await r.json().catch(() => ({}));
+    errBox.textContent = data.error || '登录失败';
+    errBox.classList.add('show');
+  } catch (err) {
+    errBox.textContent = '网络错误，请重试';
+    errBox.classList.add('show');
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

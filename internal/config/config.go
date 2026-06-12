@@ -41,6 +41,16 @@ type ServerConfig struct {
 	// user's browser). Falls back to KkFileViewURL when empty.
 	KkFileViewPublicURL string      `yaml:"kkfileview_public_url"`
 	AList               AListConfig `yaml:"alist"`
+	Admin               AdminConfig `yaml:"admin"`
+}
+
+// AdminConfig holds credentials for the internal management UI (server/client
+// configuration). The management page and its config APIs sit behind a login;
+// the public file-data APIs stay anonymous. Password can be overridden by the
+// ADMIN_PASSWORD environment variable (injected from a k8s secret).
+type AdminConfig struct {
+	User     string `yaml:"user"`     // default "admin"
+	Password string `yaml:"password"` // injected from env ADMIN_PASSWORD in k8s
 }
 
 // AListConfig holds connection info for the AList admin API.
@@ -173,6 +183,9 @@ func LoadServer(path string) (*ServerConfig, error) {
 	if pw := os.Getenv("ALIST_PASSWORD"); pw != "" {
 		cfg.AList.Password = pw
 	}
+	if pw := os.Getenv("ADMIN_PASSWORD"); pw != "" {
+		cfg.Admin.Password = pw
+	}
 	if cfg.Postgres.DSN == "" {
 		return nil, fmt.Errorf("postgres.dsn is required (set via config or POSTGRES_DSN env var)")
 	}
@@ -181,6 +194,12 @@ func LoadServer(path string) (*ServerConfig, error) {
 	}
 	if cfg.AList.Username == "" {
 		cfg.AList.Username = "admin"
+	}
+	if cfg.Admin.User == "" {
+		cfg.Admin.User = "admin"
+	}
+	if cfg.Admin.Password == "" {
+		return nil, fmt.Errorf("admin.password is required (set via config or ADMIN_PASSWORD env var)")
 	}
 	return &cfg, nil
 }

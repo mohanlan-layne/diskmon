@@ -23,8 +23,11 @@ import (
 	"diskmon/internal/server/handler"
 )
 
-//go:embed web/index.html
-var indexHTML []byte
+//go:embed web/admin.html
+var adminHTML []byte
+
+//go:embed web/login.html
+var loginHTML []byte
 
 func main() {
 	cfgPath := flag.String("config", "server-config.yaml", "path to server config YAML")
@@ -61,26 +64,48 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	// Web UI
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML) //nolint:errcheck
-	})
+	serveHTML := func(body []byte) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(body) //nolint:errcheck
+		}
+	}
 
-	handler.NewServersHandler(db, cfg.AList).Register(r)
-	handler.NewFilesHandler(db).Register(r)
-	handler.NewClientsHandler(db).Register(r)
-	dl := handler.NewDownloadHandler(db, cfg.SmbMounts)
-	dl.Register(r)
-	handler.NewTransformHandler(dl).Register(r)
-	handler.NewBizHandler(db, dl).Register(r)
+	admin := handler.NewAdminHandler(cfg.Admin.User, cfg.Admin.Password)
+
+	// Root has no public UI: send visitors to the management login.
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusFound)
+	})
+	// Public auth endpoints: login form (GET) and login/logout (POST).
+	r.Get("/admin/login", serveHTML(loginHTML))
+	admin.Register(r)
+
 	kkURL := cfg.KkFileViewPublicURL // browser-reachable; falls back to internal
 	if kkURL == "" {
 		kkURL = cfg.KkFileViewURL
 	}
+
+	// Public data APIs (anonymous) — file catalog queries, download/zip/preview.
+	handler.NewFilesHandler(db).Register(r)
+	dl := handler.NewDownloadHandler(db, cfg.SmbMounts)
+	dl.Register(r)
+	handler.NewTransformHandler(dl).Register(r)
+	handler.NewBizHandler(db, dl).Register(r)
 	handler.NewPreviewHandler(db, kkURL).Register(r)
 	handler.NewFileHandler(db, dl, kkURL).Register(r)
 	handler.NewDrawingHandler(db, dl, kkURL).Register(r)
+
+	// Management group (login required) — UI page plus server/client config APIs.
+	r.Group(func(r chi.Router) {
+		r.Use(admin.RequireAuth)
+		r.Get("/admin/", serveHTML(adminHTML))
+		r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/admin/", http.StatusFound)
+		})
+		handler.NewServersHandler(db, cfg.AList).Register(r)
+		handler.NewClientsHandler(db).Register(r)
+	})
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
