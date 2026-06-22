@@ -16,7 +16,7 @@ import (
 // backfillBatch caps how many NULL-size rows one run processes, so a single pass
 // never floods AList nor holds the DB for too long. Runs every few minutes, so a
 // large backlog drains over several passes.
-const backfillBatch = 1000
+const backfillBatch = 5000
 
 // backfillMinAgeMinutes is the grace period before a NULL-size row is eligible.
 // A freshly written file may still be uploading (temp not yet finalized); we only
