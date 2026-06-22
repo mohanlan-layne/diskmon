@@ -289,7 +289,7 @@ func latestBizFolder(ctx context.Context, db *sql.DB, serverID, bizKey string) (
 	var latest string
 	err := db.QueryRowContext(ctx,
 		`SELECT path FROM file_catalog
-		 WHERE server_id=? AND biz_key=? AND is_dir=0 AND size>0
+		 WHERE server_id=? AND biz_key=? AND is_dir=0
 		 ORDER BY updated_at DESC LIMIT 1`, serverID, bizKey).Scan(&latest)
 	if err != nil {
 		return "", err
@@ -314,10 +314,8 @@ func latestBizFolder(ctx context.Context, db *sql.DB, serverID, bizKey string) (
 // optionally filtered by extension. It matches by path prefix so only this one
 // part-number folder's files are returned.
 func (h *BizHandler) filesUnder(ctx context.Context, serverID, folder string, exts []string) (*sql.Rows, error) {
-	// size>0 excludes directories that the client mis-recorded as is_dir=0 (they
-	// carry a NULL/0 size), so a mislabeled sub-folder is never packed as a file.
 	q := `SELECT id, path, COALESCE(ext,''), size, updated_at FROM file_catalog
-	      WHERE server_id=? AND is_dir=0 AND size>0 AND LOCATE(CONCAT(?,'\\'), path)=1`
+	      WHERE server_id=? AND is_dir=0 AND LOCATE(CONCAT(?,'\\'), path)=1`
 	args := []any{serverID, folder}
 	if len(exts) > 0 {
 		q += " AND LOWER(ext) IN (" + placeholders(len(exts)) + ")"

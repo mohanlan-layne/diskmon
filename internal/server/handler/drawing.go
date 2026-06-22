@@ -13,6 +13,7 @@ package handler
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -21,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -267,15 +269,37 @@ func (h *DrawingHandler) printPDF(w http.ResponseWriter, r *http.Request) {
 func (h *DrawingHandler) zipBizKeys(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "server_id")
 
-	var body struct {
-		BizKeys []string `json:"biz_keys"`
-		Ext     []string `json:"ext"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.BizKeys) == 0 {
-		jsonError(w, "请求体须包含非空 biz_keys 数组", http.StatusBadRequest)
+	// 兼容两种请求体:
+	//   ["料号A","料号B"]                         —— Saber3 供应商自助下图前端
+	//   {"biz_keys":["料号A"],"ext":["pdf"]}       —— diskmon 原生格式
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, "读取请求体失败", http.StatusBadRequest)
 		return
 	}
-	exts := normExtSlice(body.Ext)
+	var bizKeys, extRaw []string
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &bizKeys); err != nil {
+			jsonError(w, "请求体 JSON 解析失败: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		var body struct {
+			BizKeys []string `json:"biz_keys"`
+			Ext     []string `json:"ext"`
+		}
+		if err := json.Unmarshal(trimmed, &body); err != nil {
+			jsonError(w, "请求体 JSON 解析失败: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		bizKeys, extRaw = body.BizKeys, body.Ext
+	}
+	if len(bizKeys) == 0 {
+		jsonError(w, "请求体须包含非空料号数组", http.StatusBadRequest)
+		return
+	}
+	exts := normExtSlice(extRaw)
 
 	mounts, err := loadAListMounts(r.Context(), h.db, serverID)
 	if err != nil {
@@ -284,7 +308,7 @@ func (h *DrawingHandler) zipBizKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var allEntries []zipEntry
-	for _, bk := range body.BizKeys {
+	for _, bk := range bizKeys {
 		entries, ferr := flatBizFiles(r.Context(), h.db, serverID, bk, exts, mounts)
 		if ferr != nil {
 			jsonError(w, "查询失败: "+ferr.Error(), http.StatusInternalServerError)
