@@ -4,6 +4,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -42,6 +44,21 @@ type ServerConfig struct {
 	KkFileViewPublicURL string      `yaml:"kkfileview_public_url"`
 	AList               AListConfig `yaml:"alist"`
 	Admin               AdminConfig `yaml:"admin"`
+	XXL                 XXLConfig   `yaml:"xxl"`
+}
+
+// XXLConfig configures the embedded XXL-JOB executor that drives the catalog
+// backfill task. Disabled by default so local runs don't try to reach the admin.
+// Most fields can be overridden by environment variables (injected from a k8s
+// secret/configmap): XXL_JOB_ENABLED, XXL_JOB_ADMIN_ADDR, XXL_JOB_ACCESS_TOKEN,
+// XXL_JOB_APPNAME, XXL_JOB_EXECUTOR_PORT, XXL_JOB_TOKEN.
+type XXLConfig struct {
+	Enabled      bool   `yaml:"enabled"`       // start the executor & register with admin
+	AdminAddr    string `yaml:"admin_addr"`    // e.g. http://xxl-job-admin.middleware:8080/xxl-job-admin
+	AccessToken  string `yaml:"access_token"`  // must match admin's xxl.job.accessToken
+	AppName      string `yaml:"appname"`       // executor group appname, default "diskmon"
+	ExecutorPort int    `yaml:"executor_port"` // embedded executor port, default 9999
+	JobToken     string `yaml:"job_token"`     // guards the manual HTTP trigger endpoint
 }
 
 // AdminConfig holds credentials for the internal management UI (server/client
@@ -185,6 +202,32 @@ func LoadServer(path string) (*ServerConfig, error) {
 	}
 	if pw := os.Getenv("ADMIN_PASSWORD"); pw != "" {
 		cfg.Admin.Password = pw
+	}
+	if v := os.Getenv("XXL_JOB_ENABLED"); v != "" {
+		cfg.XXL.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("XXL_JOB_ADMIN_ADDR"); v != "" {
+		cfg.XXL.AdminAddr = v
+	}
+	if v := os.Getenv("XXL_JOB_ACCESS_TOKEN"); v != "" {
+		cfg.XXL.AccessToken = v
+	}
+	if v := os.Getenv("XXL_JOB_APPNAME"); v != "" {
+		cfg.XXL.AppName = v
+	}
+	if v := os.Getenv("XXL_JOB_EXECUTOR_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.XXL.ExecutorPort = n
+		}
+	}
+	if v := os.Getenv("XXL_JOB_TOKEN"); v != "" {
+		cfg.XXL.JobToken = v
+	}
+	if cfg.XXL.AppName == "" {
+		cfg.XXL.AppName = "diskmon"
+	}
+	if cfg.XXL.ExecutorPort == 0 {
+		cfg.XXL.ExecutorPort = 9999
 	}
 	if cfg.Postgres.DSN == "" {
 		return nil, fmt.Errorf("postgres.dsn is required (set via config or POSTGRES_DSN env var)")

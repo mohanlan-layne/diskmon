@@ -96,6 +96,14 @@ func main() {
 	handler.NewFileHandler(db, dl, kkURL).Register(r)
 	handler.NewDrawingHandler(db, dl, kkURL).Register(r)
 
+	// Catalog backfill: repairs NULL-size / wrong-is_dir rows via AList. Driven by
+	// the XXL-JOB executor below; the token-guarded HTTP endpoint allows manual runs.
+	backfill := handler.NewBackfillHandler(db, cfg.XXL.JobToken)
+	backfill.Register(r)
+	if exec := startXXLExecutor(cfg.XXL, backfill, logger); exec != nil {
+		defer exec.Stop()
+	}
+
 	// Management group (login required) — UI page plus server/client config APIs.
 	r.Group(func(r chi.Router) {
 		r.Use(admin.RequireAuth)

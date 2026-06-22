@@ -7,11 +7,13 @@ require (
 	github.com/go-sql-driver/mysql v1.7.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/pdfcpu/pdfcpu v0.8.0
+	github.com/xxl-job/xxl-job-executor-go v1.2.0
 	golang.org/x/sys v0.20.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	github.com/go-basic/ipv4 v1.0.0 // indirect
 	github.com/hhrutter/lzw v1.0.0 // indirect
 	github.com/hhrutter/tiff v1.0.1 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
