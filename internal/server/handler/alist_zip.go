@@ -44,29 +44,52 @@ func (z *alistZipper) downloadURL(alistPath string) string {
 	return z.base + "/d/" + strings.Join(parts, "/")
 }
 
-// download streams the AList file at alistPath to w.
-func (z *alistZipper) download(ctx context.Context, alistPath string, w io.Writer) error {
+// fetch issues the AList download GET and returns the response only on HTTP 200.
+// The caller is responsible for closing resp.Body.
+func (z *alistZipper) fetch(ctx context.Context, alistPath string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, z.downloadURL(alistPath), nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := z.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download %s: status %d", alistPath, resp.StatusCode)
+	}
+	return resp, nil
+}
+
+// download streams the AList file at alistPath to w.
+func (z *alistZipper) download(ctx context.Context, alistPath string, w io.Writer) error {
+	resp, err := z.fetch(ctx, alistPath)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: status %d", alistPath, resp.StatusCode)
-	}
 	_, err = io.Copy(w, resp.Body)
 	return err
 }
 
 // addFile streams one AList file into the archive under zipName.
+//
+// It probes AList first and only creates the ZIP entry once the file is
+// confirmed to exist (HTTP 200). A file that 404s — e.g. a catalog row for a
+// file that was since removed, or a stray temp file (*.ldtmp) — is skipped
+// entirely rather than left as an empty entry. This is what lets us include
+// NULL/0-size catalog rows safely: real files download, phantom ones drop out.
 func (z *alistZipper) addFile(ctx context.Context, zw *zip.Writer, alistPath, zipName string) error {
+	resp, err := z.fetch(ctx, alistPath)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 	w, err := zw.Create(zipName)
 	if err != nil {
 		return err
 	}
-	return z.download(ctx, alistPath, w)
+	_, err = io.Copy(w, resp.Body)
+	return err
 }

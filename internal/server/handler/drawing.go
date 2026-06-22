@@ -362,12 +362,17 @@ func (h *DrawingHandler) zipDownload(w http.ResponseWriter, r *http.Request) {
 // by the Donguan drawing library: each large directory contains files from many
 // part numbers. Algorithm: find the most-recently-updated file for bizKey → take
 // its parent directory → return all files in that exact directory (no deeper)
-// that share the same biz_key and have size > 0.
+// that share the same biz_key.
+//
+// We deliberately do NOT filter on size>0: the client sometimes records a real
+// file with NULL/0 size (catalog incomplete), and those files do exist on AList.
+// Whether a candidate truly exists is decided at download time — addFile probes
+// AList and skips (no empty entry) anything that 404s.
 func flatBizFiles(ctx context.Context, db *sql.DB, serverID, bizKey string, exts []string, mounts AListMounts) ([]zipEntry, error) {
 	var anyPath string
 	err := db.QueryRowContext(ctx,
 		`SELECT path FROM file_catalog
-		 WHERE server_id=? AND biz_key=? AND is_dir=0 AND size>0
+		 WHERE server_id=? AND biz_key=? AND is_dir=0
 		 ORDER BY updated_at DESC LIMIT 1`,
 		serverID, bizKey).Scan(&anyPath)
 	if err == sql.ErrNoRows {
@@ -385,7 +390,7 @@ func flatBizFiles(ctx context.Context, db *sql.DB, serverID, bizKey string, exts
 	// Direct children of parent only: path starts with parent+'\' and has no
 	// further '\' after that prefix (LOCATE returns 0 when not found).
 	q := `SELECT path FROM file_catalog
-	      WHERE server_id=? AND is_dir=0 AND biz_key=? AND size>0
+	      WHERE server_id=? AND is_dir=0 AND biz_key=?
 	        AND LEFT(path, CHAR_LENGTH(?)+1) = CONCAT(?, '\\')
 	        AND LOCATE('\\', SUBSTRING(path, CHAR_LENGTH(?)+2)) = 0`
 	args := []any{serverID, bizKey, parent, parent, parent}
