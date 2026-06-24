@@ -86,6 +86,9 @@ func main() {
 		kkURL = cfg.KkFileViewURL
 	}
 
+	// Health check (used by K8s probes — must be fast).
+	handler.NewHealthHandler(db).Register(r)
+
 	// Public data APIs (anonymous) — file catalog queries, download/zip/preview.
 	handler.NewFilesHandler(db).Register(r)
 	dl := handler.NewDownloadHandler(db, cfg.SmbMounts)
