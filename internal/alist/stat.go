@@ -16,47 +16,60 @@ type DirEntry struct {
 	Size  int64
 }
 
+const listPageSize = 200
+
 // List returns the immediate children of an AList directory path (non-recursive).
 // Uses guest (anonymous) access; the directory must be accessible without a token.
+// Paginates automatically so directories with more than listPageSize entries are
+// fully returned.
 func List(ctx context.Context, hc *http.Client, base, alistPath string) ([]DirEntry, error) {
-	body, _ := json.Marshal(map[string]any{
-		"path": alistPath, "password": "", "page": 1, "per_page": 0, "refresh": false,
-	})
-	url := strings.TrimRight(base, "/") + "/api/fs/list"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	apiURL := strings.TrimRight(base, "/") + "/api/fs/list"
 
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	var all []DirEntry
+	for page := 1; ; page++ {
+		body, _ := json.Marshal(map[string]any{
+			"path": alistPath, "password": "", "page": page, "per_page": listPageSize, "refresh": false,
+		})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	var out struct {
-		Code int    `json:"code"`
-		Msg  string `json:"message"`
-		Data struct {
-			Content []struct {
-				Name  string `json:"name"`
-				IsDir bool   `json:"is_dir"`
-				Size  int64  `json:"size"`
-			} `json:"content"`
-		} `json:"data"`
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var out struct {
+			Code int    `json:"code"`
+			Msg  string `json:"message"`
+			Data struct {
+				Total   int `json:"total"`
+				Content []struct {
+					Name  string `json:"name"`
+					IsDir bool   `json:"is_dir"`
+					Size  int64  `json:"size"`
+				} `json:"content"`
+			} `json:"data"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("fs/list %s: decode: %w", alistPath, decodeErr)
+		}
+		if out.Code != 200 {
+			return nil, fmt.Errorf("fs/list %s (code %d): %s", alistPath, out.Code, out.Msg)
+		}
+		for _, c := range out.Data.Content {
+			all = append(all, DirEntry{Name: c.Name, IsDir: c.IsDir, Size: c.Size})
+		}
+		// Stop when we've received all items or got an empty page.
+		if len(out.Data.Content) == 0 || len(all) >= out.Data.Total {
+			break
+		}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("fs/list %s: decode: %w", alistPath, err)
-	}
-	if out.Code != 200 {
-		return nil, fmt.Errorf("fs/list %s (code %d): %s", alistPath, out.Code, out.Msg)
-	}
-	entries := make([]DirEntry, len(out.Data.Content))
-	for i, c := range out.Data.Content {
-		entries[i] = DirEntry{Name: c.Name, IsDir: c.IsDir, Size: c.Size}
-	}
-	return entries, nil
+	return all, nil
 }
 
 // FileInfo is the subset of AList's /api/fs/get response that the catalog
