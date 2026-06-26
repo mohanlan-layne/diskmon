@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,10 +23,11 @@ import (
 // and upserts all discovered entries into file_catalog. Unlike the full scanner
 // it never truncates data, so the catalog stays queryable throughout the run.
 type ReconcileHandler struct {
-	db       *sql.DB
+	db      *sql.DB
 	jobToken string
-	hc       *http.Client
-	logger   *slog.Logger
+	hc      *http.Client
+	logger  *slog.Logger
+	running atomic.Bool // guards against concurrent HTTP-triggered runs
 }
 
 // NewReconcileHandler creates a ReconcileHandler. jobToken guards the HTTP trigger.
@@ -62,13 +64,22 @@ func (h *ReconcileHandler) httpRun(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	serverID := r.URL.Query().Get("server_id")
-	sum, err := h.Run(r.Context(), serverID)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+	if !h.running.CompareAndSwap(false, true) {
+		jsonError(w, "reconcile already running", http.StatusConflict)
 		return
 	}
-	jsonOK(w, sum)
+	serverID := r.URL.Query().Get("server_id")
+	go func() {
+		defer h.running.Store(false)
+		sum, err := h.Run(context.Background(), serverID)
+		if err != nil {
+			h.logger.Error("reconcile async failed", "err", err)
+			return
+		}
+		h.logger.Info("reconcile async done", "summary", sum.String())
+	}()
+	w.WriteHeader(http.StatusAccepted)
+	jsonOK(w, map[string]string{"status": "started", "server_id": serverID})
 }
 
 // Run walks all servers (or just serverID when non-empty). Called by XXL-JOB.
