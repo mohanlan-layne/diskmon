@@ -395,7 +395,6 @@ ON DUPLICATE KEY UPDATE
     size=COALESCE(VALUES(size), size),
     ext=VALUES(ext),
     biz_key=COALESCE(VALUES(biz_key), biz_key),
-    updated_at=VALUES(updated_at),
     synced_at=NOW()`
 
 	args := make([]any, 0, len(entries)*8)
