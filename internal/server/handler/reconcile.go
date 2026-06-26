@@ -183,7 +183,10 @@ func (h *ReconcileHandler) walkServer(ctx context.Context, srv reconcileSrv, mou
 		queue = append(queue, walkItem{alistPath: mt.Mount, winPath: mt.Prefix})
 	}
 
-	const batchSize = 500
+	const (
+		batchSize    = 500
+		progressEvery = 500 // log progress every N dirs
+	)
 	var pending []model.FileEntry
 
 	flush := func() {
@@ -198,6 +201,14 @@ func (h *ReconcileHandler) walkServer(ctx context.Context, srv reconcileSrv, mou
 		} else {
 			sum.Upserted += n
 			sum.NewRows += int(inserted)
+			if inserted > 0 {
+				h.logger.Info("reconcile: new rows found",
+					"server", srv.id,
+					"batch_size", n,
+					"new_rows", inserted,
+					"total_new_so_far", sum.NewRows,
+				)
+			}
 		}
 		pending = pending[:0]
 	}
@@ -227,6 +238,16 @@ func (h *ReconcileHandler) walkServer(ctx context.Context, srv reconcileSrv, mou
 			UpdatedAt: now,
 		})
 		sum.Dirs++
+
+		if sum.Dirs%progressEvery == 0 {
+			h.logger.Info("reconcile: progress",
+				"server", srv.id,
+				"dirs_done", sum.Dirs,
+				"files_found", sum.Files,
+				"new_rows_so_far", sum.NewRows,
+				"queue_remaining", len(queue),
+			)
+		}
 
 		// List immediate children via AList (paginated).
 		children, err := alist.List(ctx, h.hc, mounts.Base, item.alistPath)
