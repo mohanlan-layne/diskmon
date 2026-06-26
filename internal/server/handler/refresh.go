@@ -357,25 +357,30 @@ func (h *RefreshDirHandler) listViaAList(ctx context.Context, dirPath string, mo
 // ── upsert ────────────────────────────────────────────────────────────────────
 
 func (h *RefreshDirHandler) upsert(ctx context.Context, entries []model.FileEntry) error {
+	return upsertCatalog(ctx, h.db, entries)
+}
+
+// upsertCatalog is the shared package-level upsert used by RefreshDirHandler and
+// ReconcileHandler. It inserts or updates file_catalog rows in chunks of 500,
+// preserving existing biz_key and size values when the new ones are NULL.
+func upsertCatalog(ctx context.Context, db *sql.DB, entries []model.FileEntry) error {
 	const chunkSize = 500
 	for i := 0; i < len(entries); i += chunkSize {
 		end := i + chunkSize
 		if end > len(entries) {
 			end = len(entries)
 		}
-		if err := h.upsertChunk(ctx, entries[i:end]); err != nil {
+		if err := upsertCatalogChunk(ctx, db, entries[i:end]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (h *RefreshDirHandler) upsertChunk(ctx context.Context, entries []model.FileEntry) error {
+func upsertCatalogChunk(ctx context.Context, db *sql.DB, entries []model.FileEntry) error {
 	ph := strings.Repeat("(?,?,?,?,?,?,?,?),", len(entries))
 	ph = ph[:len(ph)-1]
 
-	// biz_key IS updated here (unlike the backfill job) because we just computed it.
-	// size uses COALESCE so a NULL from a directory never overwrites a known file size.
 	query := `INSERT INTO file_catalog (server_id, volume, path, is_dir, size, ext, biz_key, updated_at)
 VALUES ` + ph + `
 ON DUPLICATE KEY UPDATE
@@ -393,7 +398,7 @@ ON DUPLICATE KEY UPDATE
 			nullableStr(e.Ext), nullableStr(e.BizKey), e.UpdatedAt,
 		)
 	}
-	_, err := h.db.ExecContext(ctx, query, args...)
+	_, err := db.ExecContext(ctx, query, args...)
 	return err
 }
 

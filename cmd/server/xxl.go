@@ -17,7 +17,7 @@ import (
 // the admin (addressType=0, like the other services) and exposes the
 // "backfillCatalog" task. Run() is blocking, so it runs in a goroutine. Returns
 // the executor for shutdown, or nil when disabled.
-func startXXLExecutor(cfg config.XXLConfig, bf *handler.BackfillHandler, logger *slog.Logger) xxl.Executor {
+func startXXLExecutor(cfg config.XXLConfig, bf *handler.BackfillHandler, rc *handler.ReconcileHandler, logger *slog.Logger) xxl.Executor {
 	if !cfg.Enabled {
 		logger.Info("xxl-job executor disabled")
 		return nil
@@ -45,6 +45,19 @@ func startXXLExecutor(cfg config.XXLConfig, bf *handler.BackfillHandler, logger 
 			return "backfill error: " + err.Error()
 		}
 		logger.Info("backfillCatalog done", "summary", sum.String())
+		return sum.String()
+	})
+	exec.RegTask("reconcileCatalog", func(ctx context.Context, req *xxl.RunReq) string {
+		serverID := ""
+		if req != nil {
+			serverID = req.ExecutorParams
+		}
+		sum, err := rc.Run(ctx, serverID)
+		if err != nil {
+			logger.Error("reconcileCatalog failed", "err", err)
+			return "reconcile error: " + err.Error()
+		}
+		logger.Info("reconcileCatalog done", "summary", sum.String())
 		return sum.String()
 	})
 

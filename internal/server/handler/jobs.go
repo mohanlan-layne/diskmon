@@ -19,9 +19,8 @@ import (
 const backfillBatch = 5000
 
 // backfillMinAgeMinutes is the grace period before a NULL-size row is eligible.
-// A freshly written file may still be uploading (temp not yet finalized); we only
-// touch rows whose updated_at is older than this to avoid racing with uploads.
-const backfillMinAgeMinutes = 10
+// 30 minutes gives large batch imports time to finish before we probe them.
+const backfillMinAgeMinutes = 30
 
 // BackfillHandler repairs file_catalog rows that the USN watcher recorded with a
 // NULL size (and possibly a wrong is_dir): it probes the real file via AList and
@@ -55,14 +54,15 @@ type BackfillSummary struct {
 	Scanned    int `json:"scanned"`    // rows examined
 	FixedFile  int `json:"fixed_file"` // files whose size was backfilled
 	FixedDir   int `json:"fixed_dir"`  // rows corrected to is_dir=1
-	Deleted    int `json:"deleted"`    // rows removed (gone or 0-byte file)
+	Deleted    int `json:"deleted"`    // rows removed (truly gone)
+	Skipped    int `json:"skipped"`    // exists on AList but still 0 bytes → retry next run
 	Unresolved int `json:"unresolved"` // path not under any AList mount → skipped, kept
 	Errors     int `json:"errors"`     // AList/DB failures → skipped, kept, retried next run
 }
 
 func (s BackfillSummary) String() string {
-	return fmt.Sprintf("scanned=%d fixed_file=%d fixed_dir=%d deleted=%d unresolved=%d errors=%d",
-		s.Scanned, s.FixedFile, s.FixedDir, s.Deleted, s.Unresolved, s.Errors)
+	return fmt.Sprintf("scanned=%d fixed_file=%d fixed_dir=%d deleted=%d skipped=%d unresolved=%d errors=%d",
+		s.Scanned, s.FixedFile, s.FixedDir, s.Deleted, s.Skipped, s.Unresolved, s.Errors)
 }
 
 // httpRun is the token-guarded manual trigger. Optional query params scope the
@@ -174,23 +174,27 @@ func (h *BackfillHandler) run(ctx context.Context, serverID string, limit int) (
 			continue
 		}
 
-		var ok2 bool
 		switch decideBackfill(fi) {
 		case actSetSize:
-			if ok2 = h.setSize(ctx, p.id, fi.Size); ok2 {
+			if h.setSize(ctx, p.id, fi.Size) {
 				sum.FixedFile++
+			} else {
+				sum.Errors++
 			}
 		case actSetDir:
-			if ok2 = h.setDir(ctx, p.id); ok2 {
+			if h.setDir(ctx, p.id) {
 				sum.FixedDir++
+			} else {
+				sum.Errors++
 			}
 		case actDelete:
-			if ok2 = h.deleteRow(ctx, p.id); ok2 {
+			if h.deleteRow(ctx, p.id) {
 				sum.Deleted++
+			} else {
+				sum.Errors++
 			}
-		}
-		if !ok2 {
-			sum.Errors++ // the UPDATE/DELETE itself failed
+		case actSkip:
+			sum.Skipped++
 		}
 	}
 	return sum, nil
@@ -200,14 +204,15 @@ func (h *BackfillHandler) run(ctx context.Context, serverID string, limit int) (
 type backfillAction int
 
 const (
-	actDelete  backfillAction = iota // file gone or genuinely 0 bytes → remove row
+	actDelete  backfillAction = iota // file is truly gone → remove row
 	actSetSize                       // real file with size>0 → backfill size, is_dir=0
 	actSetDir                        // real directory → correct is_dir=1, keep row
+	actSkip                          // file exists but size still 0 → still uploading, retry next run
 )
 
-// decideBackfill maps a probed file state to the repair action. Directories are
-// never deleted (only their is_dir is corrected); only a confirmed-missing or
-// truly-empty file is removed.
+// decideBackfill maps a probed file state to the repair action. A 0-byte file
+// that still exists is NOT deleted: it may still be transferring. Only files
+// confirmed absent by AList are removed.
 func decideBackfill(fi alist.FileInfo) backfillAction {
 	switch {
 	case !fi.Exists:
@@ -217,7 +222,7 @@ func decideBackfill(fi alist.FileInfo) backfillAction {
 	case fi.Size > 0:
 		return actSetSize
 	default:
-		return actDelete
+		return actSkip // exists but 0 bytes → still uploading
 	}
 }
 

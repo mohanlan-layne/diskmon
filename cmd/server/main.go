@@ -99,11 +99,13 @@ func main() {
 	handler.NewFileHandler(db, dl, kkURL).Register(r)
 	handler.NewDrawingHandler(db, dl, kkURL).Register(r)
 
-	// Catalog backfill: repairs NULL-size / wrong-is_dir rows via AList. Driven by
-	// the XXL-JOB executor below; the token-guarded HTTP endpoint allows manual runs.
+	// Catalog backfill: repairs NULL-size / wrong-is_dir rows via AList.
 	backfill := handler.NewBackfillHandler(db, cfg.XXL.JobToken)
 	backfill.Register(r)
-	if exec := startXXLExecutor(cfg.XXL, backfill, logger); exec != nil {
+	// Catalog reconcile: walks AList mount tree and upserts all entries (no truncation).
+	reconcile := handler.NewReconcileHandler(db, cfg.XXL.JobToken)
+	reconcile.Register(r)
+	if exec := startXXLExecutor(cfg.XXL, backfill, reconcile, logger); exec != nil {
 		defer exec.Stop()
 	}
 

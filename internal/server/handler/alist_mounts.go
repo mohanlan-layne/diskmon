@@ -122,6 +122,34 @@ func splitByPrefix(winPath, prefix string) (string, bool) {
 	return "", false
 }
 
+// alistPathToWin converts an AList virtual path back to the Windows absolute
+// path using the longest matching mount prefix. Returns ("", false) when no
+// mount covers the path.
+func (m AListMounts) alistPathToWin(alistPath string) (string, bool) {
+	var best AListMount
+	bestLen := -1
+	for _, mt := range m.Mounts {
+		root := strings.TrimRight(mt.Mount, "/")
+		if alistPath == root || strings.HasPrefix(alistPath, root+"/") {
+			if len(root) > bestLen {
+				bestLen = len(root)
+				best = mt
+			}
+		}
+	}
+	if bestLen < 0 {
+		return "", false
+	}
+	rel := strings.TrimPrefix(alistPath, strings.TrimRight(best.Mount, "/"))
+	rel = strings.TrimLeft(rel, "/")
+	rel = strings.ReplaceAll(rel, "/", `\`)
+	pfx := strings.TrimRight(best.Prefix, `\`)
+	if rel == "" {
+		return pfx, true
+	}
+	return pfx + `\` + rel, true
+}
+
 // marshalAListMounts serialises mounts for storage in servers.alist_urls.
 func marshalAListMounts(m AListMounts) (string, error) {
 	b, err := json.Marshal(m)
