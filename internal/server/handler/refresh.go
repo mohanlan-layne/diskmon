@@ -357,27 +357,34 @@ func (h *RefreshDirHandler) listViaAList(ctx context.Context, dirPath string, mo
 // ── upsert ────────────────────────────────────────────────────────────────────
 
 func (h *RefreshDirHandler) upsert(ctx context.Context, entries []model.FileEntry) error {
-	return upsertCatalog(ctx, h.db, entries)
+	_, err := upsertCatalog(ctx, h.db, entries)
+	return err
 }
 
 // upsertCatalog is the shared package-level upsert used by RefreshDirHandler and
 // ReconcileHandler. It inserts or updates file_catalog rows in chunks of 500,
 // preserving existing biz_key and size values when the new ones are NULL.
-func upsertCatalog(ctx context.Context, db *sql.DB, entries []model.FileEntry) error {
+// Returns the number of rows that were genuinely new inserts (not updates).
+func upsertCatalog(ctx context.Context, db *sql.DB, entries []model.FileEntry) (inserted int64, err error) {
 	const chunkSize = 500
 	for i := 0; i < len(entries); i += chunkSize {
 		end := i + chunkSize
 		if end > len(entries) {
 			end = len(entries)
 		}
-		if err := upsertCatalogChunk(ctx, db, entries[i:end]); err != nil {
-			return err
+		n, e := upsertCatalogChunk(ctx, db, entries[i:end])
+		inserted += n
+		if e != nil {
+			return inserted, e
 		}
 	}
-	return nil
+	return inserted, nil
 }
 
-func upsertCatalogChunk(ctx context.Context, db *sql.DB, entries []model.FileEntry) error {
+// upsertCatalogChunk executes one INSERT ... ON DUPLICATE KEY UPDATE batch.
+// Returns new_inserts estimated via MySQL affected-rows semantics:
+// new row → +1, updated row → +2, unchanged row → +0 ⟹ new = 2*N − affected.
+func upsertCatalogChunk(ctx context.Context, db *sql.DB, entries []model.FileEntry) (int64, error) {
 	ph := strings.Repeat("(?,?,?,?,?,?,?,?),", len(entries))
 	ph = ph[:len(ph)-1]
 
@@ -398,8 +405,16 @@ ON DUPLICATE KEY UPDATE
 			nullableStr(e.Ext), nullableStr(e.BizKey), e.UpdatedAt,
 		)
 	}
-	_, err := db.ExecContext(ctx, query, args...)
-	return err
+	res, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	newInserts := int64(2*len(entries)) - affected
+	if newInserts < 0 {
+		newInserts = 0
+	}
+	return newInserts, nil
 }
 
 func nullableStr(s string) any {

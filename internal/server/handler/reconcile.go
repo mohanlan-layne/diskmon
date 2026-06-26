@@ -51,12 +51,13 @@ type ReconcileSummary struct {
 	Dirs     int `json:"dirs"`
 	Files    int `json:"files"`
 	Upserted int `json:"upserted"`
+	NewRows  int `json:"new_rows"`  // rows genuinely inserted (not existing-row updates)
 	Errors   int `json:"errors"`
 }
 
 func (s ReconcileSummary) String() string {
-	return fmt.Sprintf("servers=%d dirs=%d files=%d upserted=%d errors=%d",
-		s.Servers, s.Dirs, s.Files, s.Upserted, s.Errors)
+	return fmt.Sprintf("servers=%d dirs=%d files=%d upserted=%d new_rows=%d errors=%d",
+		s.Servers, s.Dirs, s.Files, s.Upserted, s.NewRows, s.Errors)
 }
 
 func (h *ReconcileHandler) httpRun(w http.ResponseWriter, r *http.Request) {
@@ -102,8 +103,16 @@ func (h *ReconcileHandler) Run(ctx context.Context, serverID string) (ReconcileS
 		total.Dirs += s.Dirs
 		total.Files += s.Files
 		total.Upserted += s.Upserted
+		total.NewRows += s.NewRows
 		total.Errors += s.Errors
-		h.logger.Info("reconcile: server done", "server", srv.id, "result", s.String())
+		h.logger.Info("reconcile: server done",
+			"server", srv.id,
+			"dirs", s.Dirs,
+			"files", s.Files,
+			"upserted", s.Upserted,
+			"new_rows", s.NewRows,
+			"errors", s.Errors,
+		)
 	}
 	return total, nil
 }
@@ -155,6 +164,8 @@ type walkItem struct {
 func (h *ReconcileHandler) walkServer(ctx context.Context, srv reconcileSrv, mounts AListMounts) ReconcileSummary {
 	var sum ReconcileSummary
 
+	h.logger.Info("reconcile: server start", "server", srv.id, "mounts", len(mounts.Mounts))
+
 	// Build per-volume rules, cached.
 	ruleCache := map[string]bizrule.VolumeRule{}
 	rule := func(volume string) bizrule.VolumeRule {
@@ -179,11 +190,14 @@ func (h *ReconcileHandler) walkServer(ctx context.Context, srv reconcileSrv, mou
 		if len(pending) == 0 {
 			return
 		}
-		if err := upsertCatalog(ctx, h.db, pending); err != nil {
+		n := len(pending)
+		inserted, err := upsertCatalog(ctx, h.db, pending)
+		if err != nil {
 			h.logger.Error("reconcile: upsert failed", "server", srv.id, "err", err)
 			sum.Errors++
 		} else {
-			sum.Upserted += len(pending)
+			sum.Upserted += n
+			sum.NewRows += int(inserted)
 		}
 		pending = pending[:0]
 	}
