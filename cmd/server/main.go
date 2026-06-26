@@ -116,6 +116,7 @@ func main() {
 		})
 		handler.NewServersHandler(db, cfg.AList).Register(r)
 		handler.NewClientsHandler(db).Register(r)
+		handler.NewRefreshDirHandler(db, cfg.SmbMounts).Register(r)
 	})
 
 	srv := &http.Server{

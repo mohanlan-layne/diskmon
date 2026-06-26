@@ -23,6 +23,7 @@ type ServerRow struct {
 	ServerID  string          `json:"server_id"`
 	Name      string          `json:"name"`
 	SmbHost   string          `json:"smb_host"`
+	SmbShare  string          `json:"smb_share"`
 	SmbUser   string          `json:"smb_user"`
 	SysRoot   string          `json:"sys_root"`
 	Volumes   json.RawMessage `json:"volumes"`
@@ -87,7 +88,7 @@ func (h *ServersHandler) configureAList(w http.ResponseWriter, r *http.Request) 
 	// SMB credentials come from the server record.
 	var smbHost, smbUser, smbPass string
 	if err := h.db.QueryRowContext(ctx,
-		"SELECT smb_host, smb_user, COALESCE(smb_pass,'') FROM servers WHERE server_id=?", id,
+		"SELECT COALESCE(smb_host,''), COALESCE(smb_user,''), COALESCE(smb_pass,'') FROM servers WHERE server_id=?", id,
 	).Scan(&smbHost, &smbUser, &smbPass); err != nil {
 		jsonError(w, "server 不存在或无 SMB 凭据", http.StatusBadRequest)
 		return
@@ -197,8 +198,8 @@ func (h *ServersHandler) alistPing(w http.ResponseWriter, r *http.Request) {
 
 func (h *ServersHandler) list(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, server_id, COALESCE(name,''), COALESCE(smb_host,''), COALESCE(smb_user,''),
-		        COALESCE(sys_root,''), volumes, COALESCE(api_addr,''), alist_urls,
+		`SELECT id, server_id, COALESCE(name,''), COALESCE(smb_host,''), COALESCE(smb_share,''),
+		        COALESCE(smb_user,''), COALESCE(sys_root,''), volumes, COALESCE(api_addr,''), alist_urls,
 		        created_at, updated_at
 		 FROM servers ORDER BY id`)
 	if err != nil {
@@ -211,7 +212,7 @@ func (h *ServersHandler) list(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s ServerRow
 		var volumesBytes, alistURLsBytes []byte
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.SmbHost, &s.SmbUser,
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.SmbHost, &s.SmbShare, &s.SmbUser,
 			&s.SysRoot, &volumesBytes, &s.APIAddr, &alistURLsBytes,
 			&s.CreatedAt, &s.UpdatedAt); err != nil {
 			jsonError(w, "scan failed", http.StatusInternalServerError)
@@ -233,6 +234,7 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 		ServerID string          `json:"server_id"`
 		Name     string          `json:"name"`
 		SmbHost  string          `json:"smb_host"`
+		SmbShare string          `json:"smb_share"`
 		SmbUser  string          `json:"smb_user"`
 		SmbPass  string          `json:"smb_pass"`
 		SysRoot  string          `json:"sys_root"`
@@ -253,10 +255,10 @@ func (h *ServersHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	// AList storages are configured separately via POST /api/servers/{id}/alist.
 	res, err := h.db.ExecContext(ctx, `
-		INSERT INTO servers (server_id, name, smb_host, smb_user, smb_pass, sys_root,
+		INSERT INTO servers (server_id, name, smb_host, smb_share, smb_user, smb_pass, sys_root,
 		                     volumes, api_addr, api_token)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
-		body.ServerID, body.Name, body.SmbHost, body.SmbUser, body.SmbPass,
+		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		body.ServerID, body.Name, body.SmbHost, body.SmbShare, body.SmbUser, body.SmbPass,
 		body.SysRoot, nullJSON(body.Volumes),
 		nullStr(body.APIAddr), nullStr(body.APIToken),
 	)
@@ -279,11 +281,11 @@ func (h *ServersHandler) get(w http.ResponseWriter, r *http.Request) {
 	var s ServerRow
 	var volumesBytes, alistURLsBytes []byte
 	err := h.db.QueryRowContext(r.Context(),
-		`SELECT id, server_id, COALESCE(name,''), COALESCE(smb_host,''), COALESCE(smb_user,''),
-		        COALESCE(sys_root,''), volumes, COALESCE(api_addr,''), alist_urls,
+		`SELECT id, server_id, COALESCE(name,''), COALESCE(smb_host,''), COALESCE(smb_share,''),
+		        COALESCE(smb_user,''), COALESCE(sys_root,''), volumes, COALESCE(api_addr,''), alist_urls,
 		        created_at, updated_at
 		 FROM servers WHERE server_id=?`, id,
-	).Scan(&s.ID, &s.ServerID, &s.Name, &s.SmbHost, &s.SmbUser,
+	).Scan(&s.ID, &s.ServerID, &s.Name, &s.SmbHost, &s.SmbShare, &s.SmbUser,
 		&s.SysRoot, &volumesBytes, &s.APIAddr, &alistURLsBytes,
 		&s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
@@ -308,6 +310,7 @@ func (h *ServersHandler) update(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name     *string `json:"name"`
 		SmbHost  *string `json:"smb_host"`
+		SmbShare *string `json:"smb_share"`
 		SmbUser  *string `json:"smb_user"`
 		SmbPass  *string `json:"smb_pass"`
 		SysRoot  *string `json:"sys_root"`
@@ -321,11 +324,12 @@ func (h *ServersHandler) update(w http.ResponseWriter, r *http.Request) {
 	_, err := h.db.ExecContext(r.Context(), `
 		UPDATE servers SET
 		    name=COALESCE(?,name), smb_host=COALESCE(?,smb_host),
-		    smb_user=COALESCE(?,smb_user), smb_pass=COALESCE(?,smb_pass),
-		    sys_root=COALESCE(?,sys_root), api_addr=COALESCE(?,api_addr),
-		    api_token=COALESCE(?,api_token), updated_at=NOW()
+		    smb_share=COALESCE(?,smb_share), smb_user=COALESCE(?,smb_user),
+		    smb_pass=COALESCE(?,smb_pass), sys_root=COALESCE(?,sys_root),
+		    api_addr=COALESCE(?,api_addr), api_token=COALESCE(?,api_token),
+		    updated_at=NOW()
 		WHERE server_id=?`,
-		body.Name, body.SmbHost, body.SmbUser, body.SmbPass,
+		body.Name, body.SmbHost, body.SmbShare, body.SmbUser, body.SmbPass,
 		body.SysRoot, body.APIAddr, body.APIToken, id,
 	)
 	if err != nil {

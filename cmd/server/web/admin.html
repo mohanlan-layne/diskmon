@@ -252,6 +252,7 @@ curl -o drawings.zip "<span class="b"></span>/api/pdf-printing/dongguan-srv/zip-
     <div class="form-row"><label>Server ID *</label><input id="a-id" placeholder="server-a"></div>
     <div class="form-row"><label>名称</label><input id="a-name" placeholder="工厂A 图档服务器"></div>
     <div class="form-row"><label>SMB 主机 IP</label><input id="a-smb" placeholder="192.168.1.10"></div>
+    <div class="form-row"><label>SMB 共享名</label><input id="a-share" placeholder="smb（即 \\host\smb 里的 smb）"></div>
     <div class="form-row"><label>SMB 用户名</label><input id="a-user" placeholder="zjit"></div>
     <div class="form-row"><label>SMB 密码</label><input id="a-pass" type="password"></div>
     <div class="form-row"><label>Client 管理 API 地址</label><input id="a-api" placeholder="192.168.1.10:19090"></div>
@@ -287,6 +288,7 @@ curl -o drawings.zip "<span class="b"></span>/api/pdf-printing/dongguan-srv/zip-
     <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:center">
       <label>显示名</label><input id="es-name">
       <label>SMB 主机</label><input id="es-smbhost">
+      <label>SMB 共享名</label><input id="es-smbshare" placeholder="如 smb">
       <label>SMB 账号</label><input id="es-smbuser" placeholder="如 EASTWINSZ\zjit">
       <label>SMB 密码</label><input id="es-smbpass" type="password" placeholder="留空＝不修改">
       <label>管理 API 地址</label><input id="es-apiaddr" placeholder="如 192.168.1.15:19090">
@@ -577,8 +579,12 @@ function isPreviewable(ext) {
 // rowActions 渲染单行的操作按钮。按下标引用 currentFiles，避免把含反斜杠的
 // Windows 路径塞进 onclick 字符串导致转义错乱。
 function rowActions(f, i) {
+  const refreshBtn = `<button class="btn sm grey" onclick="refreshDir(${i})" title="重新扫描所属目录并更新数据库">刷新目录</button>`;
   if (f.is_dir) {
-    return `<button class="btn sm" onclick="zipDir(${i})">📦 打包下载</button>`;
+    return `<div style="display:flex;gap:5px;flex-wrap:wrap">
+      <button class="btn sm" onclick="zipDir(${i})">📦 打包下载</button>
+      ${refreshBtn}
+    </div>`;
   }
   const ext = (f.ext || '').toLowerCase();
   let btns = `<button class="btn sm" onclick="dlFile(${i})">下载</button>`;
@@ -588,7 +594,35 @@ function rowActions(f, i) {
   if (ext === '.pdf') {
     btns += ` <button class="btn sm grey" onclick="watermarkFile(${i})">水印</button>`;
   }
+  btns += ` ${refreshBtn}`;
   return `<div style="display:flex;gap:5px;flex-wrap:wrap">${btns}</div>`;
+}
+
+async function refreshDir(i) {
+  const f = currentFiles[i];
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '刷新中…';
+  try {
+    const { ok, data } = await api('POST', '/api/files/refresh-dir', {
+      server_id: currentServerID,
+      path: f.path,
+      is_dir: f.is_dir,
+    });
+    if (ok) {
+      const dir = data.dir || '';
+      const n = data.entries || 0;
+      btn.textContent = `✓ ${n}条`;
+      btn.style.background = '#059669';
+      setTimeout(() => { btn.disabled = false; btn.textContent = '刷新目录'; btn.style.background = ''; }, 3000);
+    } else {
+      alert('刷新失败：' + ((data && data.error) || ''));
+      btn.disabled = false; btn.textContent = '刷新目录';
+    }
+  } catch(e) {
+    alert('请求失败：' + e.message);
+    btn.disabled = false; btn.textContent = '刷新目录';
+  }
 }
 
 function dlFile(i) {
@@ -690,7 +724,7 @@ function fileIcon(ext) {
 // ── 添加服务器 ────────────────────────────────────
 function openAddServer() {
   document.getElementById('add-alert').innerHTML = '';
-  ['a-id','a-name','a-smb','a-user','a-pass','a-api','a-token'].forEach(id =>
+  ['a-id','a-name','a-smb','a-share','a-user','a-pass','a-api','a-token'].forEach(id =>
     document.getElementById(id).value = '');
   document.getElementById('modal-add').classList.add('show');
 }
@@ -700,6 +734,7 @@ async function submitAddServer() {
   const body = {
     server_id: id, name: document.getElementById('a-name').value.trim(),
     smb_host: document.getElementById('a-smb').value.trim(),
+    smb_share: document.getElementById('a-share').value.trim(),
     smb_user: document.getElementById('a-user').value.trim(),
     smb_pass: document.getElementById('a-pass').value,
     api_addr: document.getElementById('a-api').value.trim(),
@@ -755,6 +790,7 @@ function editServer(id) {
   document.getElementById('es-id').value = id;
   document.getElementById('es-name').value = s.name || '';
   document.getElementById('es-smbhost').value = s.smb_host || '';
+  document.getElementById('es-smbshare').value = s.smb_share || '';
   document.getElementById('es-smbuser').value = s.smb_user || '';
   document.getElementById('es-smbpass').value = '';
   document.getElementById('es-apiaddr').value = s.api_addr || '';
@@ -764,11 +800,12 @@ function editServer(id) {
 async function saveServer() {
   const id = document.getElementById('es-id').value;
   const body = {
-    name:     document.getElementById('es-name').value,
-    smb_host: document.getElementById('es-smbhost').value,
-    smb_user: document.getElementById('es-smbuser').value,
-    api_addr: document.getElementById('es-apiaddr').value,
-    sys_root: document.getElementById('es-sysroot').value,
+    name:      document.getElementById('es-name').value,
+    smb_host:  document.getElementById('es-smbhost').value,
+    smb_share: document.getElementById('es-smbshare').value,
+    smb_user:  document.getElementById('es-smbuser').value,
+    api_addr:  document.getElementById('es-apiaddr').value,
+    sys_root:  document.getElementById('es-sysroot').value,
   };
   const pass = document.getElementById('es-smbpass').value;
   if (pass) body.smb_pass = pass;   // 留空＝保留原密码

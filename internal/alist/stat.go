@@ -9,6 +9,56 @@ import (
 	"strings"
 )
 
+// DirEntry is one item returned by /api/fs/list.
+type DirEntry struct {
+	Name  string
+	IsDir bool
+	Size  int64
+}
+
+// List returns the immediate children of an AList directory path (non-recursive).
+// Uses guest (anonymous) access; the directory must be accessible without a token.
+func List(ctx context.Context, hc *http.Client, base, alistPath string) ([]DirEntry, error) {
+	body, _ := json.Marshal(map[string]any{
+		"path": alistPath, "password": "", "page": 1, "per_page": 0, "refresh": false,
+	})
+	url := strings.TrimRight(base, "/") + "/api/fs/list"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"message"`
+		Data struct {
+			Content []struct {
+				Name  string `json:"name"`
+				IsDir bool   `json:"is_dir"`
+				Size  int64  `json:"size"`
+			} `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("fs/list %s: decode: %w", alistPath, err)
+	}
+	if out.Code != 200 {
+		return nil, fmt.Errorf("fs/list %s (code %d): %s", alistPath, out.Code, out.Msg)
+	}
+	entries := make([]DirEntry, len(out.Data.Content))
+	for i, c := range out.Data.Content {
+		entries[i] = DirEntry{Name: c.Name, IsDir: c.IsDir, Size: c.Size}
+	}
+	return entries, nil
+}
+
 // FileInfo is the subset of AList's /api/fs/get response that the catalog
 // backfill job needs.
 type FileInfo struct {
