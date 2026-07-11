@@ -18,13 +18,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	_ "embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,16 +81,14 @@ func initCJKFont() error {
 type DrawingHandler struct {
 	db    *sql.DB
 	dl    *DownloadHandler
-	kkURL string
 	store *tempStore
 }
 
 // NewDrawingHandler creates a DrawingHandler.
-func NewDrawingHandler(db *sql.DB, dl *DownloadHandler, kkURL string) *DrawingHandler {
+func NewDrawingHandler(db *sql.DB, dl *DownloadHandler) *DrawingHandler {
 	return &DrawingHandler{
 		db:    db,
 		dl:    dl,
-		kkURL: strings.TrimRight(kkURL, "/"),
 		store: newTempStore(),
 	}
 }
@@ -105,44 +102,76 @@ func (h *DrawingHandler) Register(r chi.Router) {
 	r.Get("/api/pdf-printing/{server_id}/zip-download/{name}", h.zipDownload)
 }
 
-// drawingPreview redirects to the kkFileView preview of the latest PDF (size>0)
-// for the given biz_key (料号).
+// errNoPDF signals the catalog has no PDF rows at all for a biz_key.
+var errNoPDF = errors.New("no pdf in catalog")
+
+// drawingPDFCandidates is how many newest catalog rows fetchLatestPDF tries
+// before giving up. The newest row can be stale (file since moved/deleted on
+// AList while the catalog hasn't reconciled yet), so we fall back to older ones.
+const drawingPDFCandidates = 5
+
+// fetchLatestPDF downloads the newest available PDF for bizKey to a local temp
+// file, skipping stale catalog rows whose file no longer exists on AList.
+// Returns errNoPDF when the catalog has no PDF rows, otherwise the last
+// download error if every candidate failed.
+func (h *DrawingHandler) fetchLatestPDF(ctx context.Context, serverID, bizKey string) (string, func(), error) {
+	rows, err := h.db.QueryContext(ctx,
+		`SELECT path FROM file_catalog
+		 WHERE server_id=? AND biz_key=? AND is_dir=0 AND size>0 AND LOWER(ext)='.pdf'
+		 ORDER BY updated_at DESC LIMIT ?`,
+		serverID, bizKey, drawingPDFCandidates)
+	if err != nil {
+		return "", nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return "", nil, err
+		}
+		paths = append(paths, p)
+	}
+	if err := rows.Err(); err != nil {
+		return "", nil, err
+	}
+	if len(paths) == 0 {
+		return "", nil, errNoPDF
+	}
+
+	var lastErr error
+	for _, p := range paths {
+		lp, cleanup, err := h.dl.fetchLocal(ctx, serverID, p, "diskmon-draw-*.pdf")
+		if err == nil {
+			return lp, cleanup, nil
+		}
+		lastErr = err
+	}
+	return "", nil, lastErr
+}
+
+// drawingPreview streams the latest available PDF for the given biz_key (料号)
+// directly as application/pdf, matching the old PrintServer.jar behaviour: the
+// browser renders it inline (Content-Disposition inline, no kkFileView redirect).
 // GET /api/drawing/{server_id}/{biz_key}
 func (h *DrawingHandler) drawingPreview(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "server_id")
 	bizKey := chi.URLParam(r, "biz_key")
 
-	var path string
-	err := h.db.QueryRowContext(r.Context(),
-		`SELECT path FROM file_catalog
-		 WHERE server_id=? AND biz_key=? AND is_dir=0 AND size>0 AND LOWER(ext)='.pdf'
-		 ORDER BY updated_at DESC LIMIT 1`,
-		serverID, bizKey).Scan(&path)
-	if err == sql.ErrNoRows {
+	lp, cleanup, err := h.fetchLatestPDF(r.Context(), serverID, bizKey)
+	if err == errNoPDF {
 		jsonError(w, "该料号没有 PDF 图纸", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		jsonError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, "下载 PDF 失败: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	defer cleanup()
 
-	mounts, err := loadAListMounts(r.Context(), h.db, serverID)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	fileURL, ok := mounts.previewFileURL(path)
-	if !ok {
-		jsonError(w, "该文件不在任何 AList 挂载目录下", http.StatusBadRequest)
-		return
-	}
-	if h.kkURL == "" {
-		jsonOK(w, map[string]string{"url": fileURL})
-		return
-	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(fileURL))
-	http.Redirect(w, r, h.kkURL+"/onlinePreview?url="+url.QueryEscape(encoded), http.StatusFound)
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", `inline; filename="`+bizKey+`.pdf"`)
+	http.ServeFile(w, r, lp)
 }
 
 // joinItem is one element in the merge-PDF request.
@@ -179,24 +208,11 @@ func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 		if item.PDFName == "" {
 			continue
 		}
-		var pdfPath string
-		err := h.db.QueryRowContext(r.Context(),
-			`SELECT path FROM file_catalog
-			 WHERE server_id=? AND biz_key=? AND is_dir=0 AND size>0 AND LOWER(ext)='.pdf'
-			 ORDER BY updated_at DESC LIMIT 1`,
-			serverID, item.PDFName).Scan(&pdfPath)
-		if err == sql.ErrNoRows {
+		// 无图或文件已不在 AList 的料号直接跳过，保持老系统"尽量合并"的语义；
+		// 全部跳过时最终返回 404。
+		lp, cleanup, err := h.fetchLatestPDF(r.Context(), serverID, item.PDFName)
+		if err != nil {
 			continue
-		}
-		if err != nil {
-			jsonError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		lp, cleanup, err := h.dl.fetchLocal(r.Context(), serverID, pdfPath, "diskmon-draw-*.pdf")
-		if err != nil {
-			jsonError(w, "下载 PDF 失败: "+err.Error(), http.StatusBadGateway)
-			return
 		}
 		cleanups = append(cleanups, cleanup)
 

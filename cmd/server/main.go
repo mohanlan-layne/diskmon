@@ -97,7 +97,7 @@ func main() {
 	handler.NewBizHandler(db, dl).Register(r)
 	handler.NewPreviewHandler(db, kkURL).Register(r)
 	handler.NewFileHandler(db, dl, kkURL).Register(r)
-	handler.NewDrawingHandler(db, dl, kkURL).Register(r)
+	handler.NewDrawingHandler(db, dl).Register(r)
 
 	// Catalog backfill: repairs NULL-size / wrong-is_dir rows via AList.
 	backfill := handler.NewBackfillHandler(db, cfg.XXL.JobToken)

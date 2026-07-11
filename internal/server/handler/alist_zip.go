@@ -2,7 +2,9 @@ package handler
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,6 +60,26 @@ func (z *alistZipper) fetch(ctx context.Context, alistPath string) (*http.Respon
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		return nil, fmt.Errorf("download %s: status %d", alistPath, resp.StatusCode)
+	}
+	// AList reports errors like "object not found" (stale catalog row, file
+	// moved/deleted) as HTTP 200 with a JSON envelope {"code":500,"message":…}.
+	// Detect that envelope so callers see a failure instead of streaming the
+	// JSON through as file content. Legit JSON file downloads are preserved by
+	// re-attaching the sniffed bytes to the body.
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		head, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		var e struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(head, &e) == nil && e.Code != 0 && e.Code != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("download %s: alist error %d: %s", alistPath, e.Code, e.Message)
+		}
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), resp.Body), resp.Body}
 	}
 	return resp, nil
 }
