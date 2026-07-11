@@ -182,8 +182,8 @@ func (h *DrawingHandler) drawingPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	defer cleanup()
 
+	// v1 只设 Content-Type、不带 Content-Disposition，浏览器内嵌打开。
 	w.Header().Set("Content-Type", "application/pdf")
-	w.Header().Set("Content-Disposition", `inline; filename="`+bizKey+`.pdf"`)
 	http.ServeFile(w, r, lp)
 }
 
