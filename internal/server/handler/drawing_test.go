@@ -34,16 +34,10 @@ func TestTempStore_PutGet(t *testing.T) {
 		t.Fatalf("get: want (%s, true), got (%s, %v)", f.Name(), path, ok)
 	}
 
-	// pop consumes the entry
-	path2, ok2 := s.pop(key)
+	// get 可重复取（v1 语义：TTL 内可反复下载）
+	path2, ok2 := s.get(key)
 	if !ok2 || path2 != f.Name() {
-		t.Fatalf("pop: want (%s, true), got (%s, %v)", f.Name(), path2, ok2)
-	}
-
-	// subsequent get returns false
-	_, ok3 := s.get(key)
-	if ok3 {
-		t.Fatal("get after pop should return false")
+		t.Fatalf("repeat get: want (%s, true), got (%s, %v)", f.Name(), path2, ok2)
 	}
 }
 
@@ -58,10 +52,6 @@ func TestTempStore_Expiry(t *testing.T) {
 	_, ok := s.get(key)
 	if ok {
 		t.Fatal("expired entry should not be returned by get")
-	}
-	_, ok2 := s.pop(key)
-	if ok2 {
-		t.Fatal("expired entry should not be returned by pop")
 	}
 }
 

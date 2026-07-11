@@ -19,6 +19,7 @@ package handler
 //	DISKMON_IT_SERVER  目标 server_id(默认 dc-it-s-31)
 
 import (
+	"archive/zip"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -71,6 +72,7 @@ func TestSupplierDownloadFlow(t *testing.T) {
 	}
 
 	// ── ③ 合并打印:POST join(前端格式 [{pdfName,pdfExplain}]) ──────
+	// v1 契约:{"status":true,"mergeName":"<无扩展名>","lhs":""}
 	var printName string
 	{
 		items := make([]map[string]string, 0, len(keys))
@@ -80,47 +82,89 @@ func TestSupplierDownloadFlow(t *testing.T) {
 				"pdfExplain": "计划跟踪号:TRK-" + itoa(i) + " 采购单号:PO-2024 数量:" + itoa(i+1),
 			})
 		}
-		body, mergeName := postJSON(t, ts.URL+"/api/pdf-printing/"+serverID+"/join", items)
-		if mergeName == "" {
-			t.Fatalf("join 未返回 mergeName,响应: %s", body)
+		body, out := postJSON(t, ts.URL+"/api/pdf-printing/"+serverID+"/join", items)
+		if out.MergeName == "" || !out.Status {
+			t.Fatalf("join 期望 status=true 且 mergeName 非空,响应: %s", body)
 		}
-		printName = mergeName
-		t.Logf("③ 合并打印 %d 个料号 → mergeName=%s ✅", len(keys), printName)
+		if strings.Contains(out.MergeName, ".") {
+			t.Fatalf("v1 契约 mergeName 不应带扩展名,实际 %s", out.MergeName)
+		}
+		if out.Lhs != "" {
+			t.Fatalf("样本料号均有图,lhs 应为空,实际 %q", out.Lhs)
+		}
+		printName = out.MergeName
+		t.Logf("③ 合并打印 %d 个料号 → {status:true, mergeName:%s, lhs:\"\"} ✅", len(keys), printName)
 	}
 
-	// ── ④ 取打印件:GET print/{mergeName},校验是 PDF ────────────────
+	// ── ④ 取打印件:GET print/{mergeName},校验是 PDF 且可重复下载 ───
 	{
 		u := base + "/pdf-printing/" + serverID + "/print/" + printName
 		assertMagic(t, u, "%PDF", "application/pdf")
-		t.Logf("④ 下载打印件 %s → PDF ✅", printName)
+		assertMagic(t, u, "%PDF", "application/pdf") // v1 语义:TTL 内可重复下载
+		t.Logf("④ 下载打印件 %s → PDF,重复下载 ✅", printName)
 	}
 
 	// ── ⑤ 批量打包(前端字符串数组 ["料号"]) ────────────────────────
 	var zipName string
 	{
-		body, mergeName := postJSON(t, ts.URL+"/api/pdf-printing/"+serverID+"/zip", keys)
-		if mergeName == "" {
-			t.Fatalf("zip(数组格式)未返回 mergeName,响应: %s", body)
+		body, out := postJSON(t, ts.URL+"/api/pdf-printing/"+serverID+"/zip", keys)
+		if out.MergeName == "" || !out.Status {
+			t.Fatalf("zip(数组格式)期望 status=true 且 mergeName 非空,响应: %s", body)
 		}
-		zipName = mergeName
-		t.Logf("⑤ 批量打包(字符串数组)%v → mergeName=%s ✅", keys, zipName)
+		if strings.Contains(out.MergeName, ".") {
+			t.Fatalf("v1 契约 mergeName 不应带扩展名,实际 %s", out.MergeName)
+		}
+		zipName = out.MergeName
+		t.Logf("⑤ 批量打包(字符串数组)%v → {status:true, mergeName:%s} ✅", keys, zipName)
 	}
 
-	// ── ⑥ 取打包件:GET zip-download/{mergeName},校验是 ZIP ─────────
+	// ── ⑥ 取打包件:GET zip-download/{mergeName},校验 ZIP 且可重复,
+	//     且内部结构为 料号\文件名(v1 按料号分文件夹) ─────────────────
 	{
 		u := base + "/pdf-printing/" + serverID + "/zip-download/" + zipName
 		assertMagic(t, u, "PK", "application/zip")
-		t.Logf("⑥ 下载打包件 %s → ZIP ✅", zipName)
+		raw := getBytes(t, u) // v1 语义:可重复下载
+		zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+		if err != nil {
+			t.Fatalf("解析 ZIP: %v", err)
+		}
+		for _, f := range zr.File {
+			if !strings.Contains(f.Name, `\`) {
+				t.Fatalf("v1 契约 ZIP 条目应为 料号\\文件名,实际 %q", f.Name)
+			}
+		}
+		t.Logf("⑥ 下载打包件 %s → ZIP(%d 个条目,料号\\文件名 结构),重复下载 ✅", zipName, len(zr.File))
 	}
 
 	// ── ⑦ 打包接口向后兼容:diskmon 原生对象格式 {biz_keys:[]} ───────
 	{
 		reqBody := map[string]any{"biz_keys": keys[:1]}
-		body, mergeName := postJSON(t, ts.URL+"/api/pdf-printing/"+serverID+"/zip", reqBody)
-		if mergeName == "" {
+		body, out := postJSON(t, ts.URL+"/api/pdf-printing/"+serverID+"/zip", reqBody)
+		if out.MergeName == "" {
 			t.Fatalf("zip(对象格式)未返回 mergeName,响应: %s", body)
 		}
-		t.Logf("⑦ 打包(对象格式 {biz_keys})%v → mergeName=%s ✅ 向后兼容", keys[:1], mergeName)
+		t.Logf("⑦ 打包(对象格式 {biz_keys})%v → mergeName=%s ✅ 向后兼容", keys[:1], out.MergeName)
+	}
+
+	// ── ⑧ 错误契约:无图料号 → HTTP 200 + {"code":"500","msg":…} ────
+	{
+		resp, err := http.Get(base + "/drawing/" + serverID + "/NO-SUCH-KEY-00000")
+		if err != nil {
+			t.Fatalf("GET 预览(无图): %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("v1 契约错误响应应为 200,实际 %d", resp.StatusCode)
+		}
+		var e struct {
+			Code string `json:"code"`
+			Msg  string `json:"msg"`
+		}
+		if err := json.Unmarshal(raw, &e); err != nil || e.Code != "500" || e.Msg == "" {
+			t.Fatalf("v1 契约错误体应为 {code:\"500\",msg:…},实际 %s", raw)
+		}
+		t.Logf("⑧ 无图料号 → 200 {code:%q, msg:%q} ✅ v1 错误契约", e.Code, e.Msg)
 	}
 
 	t.Log("🎉 供应商自助下图全链路通过")
@@ -155,8 +199,15 @@ func sampleBizKeys(t *testing.T, db *sql.DB, serverID string, n int) []string {
 	return keys
 }
 
-// postJSON POST 一个 JSON body,返回原始响应文本和其中的 mergeName(若有)。
-func postJSON(t *testing.T, url string, payload any) (string, string) {
+// v1Resp 是老 PrintServer join/zip 的出参形状。
+type v1Resp struct {
+	Status    bool   `json:"status"`
+	MergeName string `json:"mergeName"`
+	Lhs       string `json:"lhs"`
+}
+
+// postJSON POST 一个 JSON body,返回原始响应文本和解析出的 v1 形状出参。
+func postJSON(t *testing.T, url string, payload any) (string, v1Resp) {
 	t.Helper()
 	buf, _ := json.Marshal(payload)
 	resp, err := http.Post(url, "application/json", bytes.NewReader(buf))
@@ -168,11 +219,24 @@ func postJSON(t *testing.T, url string, payload any) (string, string) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST %s 期望 200,实际 %d,响应: %s", url, resp.StatusCode, raw)
 	}
-	var out struct {
-		MergeName string `json:"mergeName"`
-	}
+	var out v1Resp
 	_ = json.Unmarshal(raw, &out)
-	return string(raw), out.MergeName
+	return string(raw), out
+}
+
+// getBytes GET 一个 URL,校验 200 并返回完整响应体。
+func getBytes(t *testing.T, url string) []byte {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s 期望 200,实际 %d,响应: %s", url, resp.StatusCode, raw[:min(len(raw), 300)])
+	}
+	return raw
 }
 
 // assertMagic GET 一个 URL,校验状态 200、Content-Type 含 wantType、body 以 magic 开头。

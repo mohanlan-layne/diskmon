@@ -102,6 +102,22 @@ func (h *DrawingHandler) Register(r chi.Router) {
 	r.Get("/api/pdf-printing/{server_id}/zip-download/{name}", h.zipDownload)
 }
 
+// v1Error replicates the old PrintServer.jar error contract: HTTP 200 with
+// {"code":"500","msg":…} (code is a string). MRP 分单等老调用方按这个形状写的
+// 错误处理，替换期必须保持 —— 这些路由上不要改回真实 HTTP 错误码。
+func v1Error(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": "500", "msg": msg})
+}
+
+// v1Result replicates the old PrintServer.jar join/zip response:
+// {"status":bool,"mergeName":"<无扩展名>","lhs":"料号1,料号2,"}。
+// lhs 是"没查到/没取到文件"的料号列表（逗号分隔、结尾带逗号，与 Java
+// StringBuilder 输出一致）；MRP 分单前端靠它弹"未查询到XX等打印信息"。
+func v1Result(w http.ResponseWriter, status bool, mergeName, lhs string) {
+	jsonOK(w, map[string]any{"status": status, "mergeName": mergeName, "lhs": lhs})
+}
+
 // errNoPDF signals the catalog has no PDF rows at all for a biz_key.
 var errNoPDF = errors.New("no pdf in catalog")
 
@@ -159,12 +175,9 @@ func (h *DrawingHandler) drawingPreview(w http.ResponseWriter, r *http.Request) 
 	bizKey := chi.URLParam(r, "biz_key")
 
 	lp, cleanup, err := h.fetchLatestPDF(r.Context(), serverID, bizKey)
-	if err == errNoPDF {
-		jsonError(w, "该料号没有 PDF 图纸", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		jsonError(w, "下载 PDF 失败: "+err.Error(), http.StatusBadGateway)
+		// v1 语义：找不到/取不到统一 200 + {"code":"500","msg":"要查找的文件不存在"}
+		v1Error(w, "要查找的文件不存在")
 		return
 	}
 	defer cleanup()
@@ -181,8 +194,8 @@ type joinItem struct {
 }
 
 // joinPDF fetches the latest PDF for each biz_key, stamps every page with the
-// optional pdfExplain text, merges them in order, and returns {mergeName} for a
-// follow-up GET /print/{mergeName}.
+// optional pdfExplain text, merges them in order, and returns the v1-shaped
+// {status,mergeName,lhs} for a follow-up GET /print/{mergeName}.
 // POST /api/pdf-printing/{server_id}/join
 func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "server_id")
@@ -198,6 +211,7 @@ func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 
 	var tomerge []string
 	var cleanups []func()
+	var lhs strings.Builder // v1 语义：没查到/没取到文件的料号，"料号1,料号2,"
 	defer func() {
 		for _, c := range cleanups {
 			c()
@@ -208,10 +222,10 @@ func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 		if item.PDFName == "" {
 			continue
 		}
-		// 无图或文件已不在 AList 的料号直接跳过，保持老系统"尽量合并"的语义；
-		// 全部跳过时最终返回 404。
+		// 无图或文件已不在 AList 的料号记入 lhs 并跳过，保持老系统"尽量合并"的语义。
 		lp, cleanup, err := h.fetchLatestPDF(r.Context(), serverID, item.PDFName)
 		if err != nil {
+			lhs.WriteString(item.PDFName + ",")
 			continue
 		}
 		cleanups = append(cleanups, cleanup)
@@ -227,11 +241,6 @@ func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 		tomerge = append(tomerge, lp)
 	}
 
-	if len(tomerge) == 0 {
-		jsonError(w, "这些料号下没有可用的 PDF 文件", http.StatusNotFound)
-		return
-	}
-
 	var valid []string
 	for _, lp := range tomerge {
 		if api.ValidateFile(lp, conf) == nil {
@@ -239,13 +248,14 @@ func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(valid) == 0 {
-		jsonError(w, "所有 PDF 均无法解析（可能损坏）", http.StatusUnprocessableEntity)
+		// v1 全部失败：200 + {"status":false,"mergeName":"","lhs":"…"}
+		v1Result(w, false, "", lhs.String())
 		return
 	}
 
 	tmp, err := os.CreateTemp("", "diskmon-join-*.pdf")
 	if err != nil {
-		jsonError(w, "create temp file failed", http.StatusInternalServerError)
+		v1Error(w, "create temp file failed")
 		return
 	}
 	tmpName := tmp.Name()
@@ -253,34 +263,38 @@ func (h *DrawingHandler) joinPDF(w http.ResponseWriter, r *http.Request) {
 
 	if err := api.MergeCreateFile(valid, tmpName, false, conf); err != nil {
 		os.Remove(tmpName)
-		jsonError(w, "merge failed: "+err.Error(), http.StatusInternalServerError)
+		v1Error(w, "merge failed: "+err.Error())
 		return
 	}
 
 	key := h.store.put(tmpName)
-	jsonOK(w, map[string]string{"mergeName": key + ".pdf"})
+	// v1 的 mergeName 不带扩展名；print/{name} 侧对有无 .pdf 后缀都兼容。
+	v1Result(w, true, key, lhs.String())
 }
 
-// printPDF serves the merged PDF produced by joinPDF (one-time download).
+// printPDF serves the merged PDF produced by joinPDF. Repeatable within the
+// 30-minute TTL (v1 semantics: MRP opens this URL with window.open and the
+// browser PDF viewer issues multiple/range requests; a refresh must also work).
+// The file is deleted by the tempStore sweep goroutine when the TTL expires.
+// Like v1, no Content-Disposition — the browser renders the PDF inline for printing.
 // GET /api/pdf-printing/{server_id}/print/{name}
 func (h *DrawingHandler) printPDF(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	key := strings.TrimSuffix(name, ".pdf")
-	path, ok := h.store.pop(key)
+	path, ok := h.store.get(key)
 	if !ok {
-		jsonError(w, "文件不存在或已过期（30分钟有效）", http.StatusNotFound)
+		v1Error(w, "当前回话已失效,请重新选择图纸") // 文案照抄 v1（含"回话"错别字）
 		return
 	}
-	defer os.Remove(path)
 	w.Header().Set("Content-Type", "application/pdf")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeFile(w, r, path)
 }
 
 // zipBizKeys packs files for the given biz_keys using flat-directory lookup
 // (东莞图档库 pattern: find a file with matching biz_key → take its parent
 // directory → collect all files in that directory with the same biz_key).
-// Returns {mergeName} for a follow-up GET /zip-download/{mergeName}.
+// Returns the v1-shaped {status,mergeName,lhs} for a follow-up
+// GET /zip-download/{mergeName}.
 // POST /api/pdf-printing/{server_id}/zip
 func (h *DrawingHandler) zipBizKeys(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "server_id")
@@ -324,22 +338,28 @@ func (h *DrawingHandler) zipBizKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var allEntries []zipEntry
+	var lhs strings.Builder // v1 语义：没查到文件的料号，"料号1,料号2,"
 	for _, bk := range bizKeys {
 		entries, ferr := flatBizFiles(r.Context(), h.db, serverID, bk, exts, mounts)
 		if ferr != nil {
-			jsonError(w, "查询失败: "+ferr.Error(), http.StatusInternalServerError)
+			v1Error(w, "查询失败: "+ferr.Error())
 			return
+		}
+		if len(entries) == 0 {
+			lhs.WriteString(bk + ",")
+			continue
 		}
 		allEntries = append(allEntries, entries...)
 	}
 	if len(allEntries) == 0 {
-		jsonError(w, "没有可打包的文件", http.StatusNotFound)
+		// v1 全部失败：200 + {"status":false,"mergeName":"","lhs":"…"}
+		v1Result(w, false, "", lhs.String())
 		return
 	}
 
 	tmp, err := os.CreateTemp("", "diskmon-drawing-zip-*.zip")
 	if err != nil {
-		jsonError(w, "create temp file failed", http.StatusInternalServerError)
+		v1Error(w, "create temp file failed")
 		return
 	}
 	tmpName := tmp.Name()
@@ -353,22 +373,26 @@ func (h *DrawingHandler) zipBizKeys(w http.ResponseWriter, r *http.Request) {
 	tmp.Close()
 
 	key := h.store.put(tmpName)
-	jsonOK(w, map[string]string{"mergeName": key + ".zip"})
+	// v1 的 mergeName 不带扩展名；zip-download/{name} 侧对有无 .zip 后缀都兼容。
+	v1Result(w, true, key, lhs.String())
 }
 
-// zipDownload serves the ZIP archive produced by zipBizKeys (one-time download).
+// zipDownload serves the ZIP archive produced by zipBizKeys. Repeatable within
+// the 30-minute TTL (v1 semantics); the sweep goroutine deletes expired files.
+// The Content-Disposition filename mimics v1's datetime name (Java
+// SimpleDateFormat "yyyy年MM月dd日hh时mm分ss秒" — hh is 12-hour, copied as-is).
 // GET /api/pdf-printing/{server_id}/zip-download/{name}
 func (h *DrawingHandler) zipDownload(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	key := strings.TrimSuffix(name, ".zip")
-	path, ok := h.store.pop(key)
+	path, ok := h.store.get(key)
 	if !ok {
-		jsonError(w, "文件不存在或已过期（30分钟有效）", http.StatusNotFound)
+		v1Error(w, "当前会话已失效,请重新选择图纸打印")
 		return
 	}
-	defer os.Remove(path)
+	date := time.Now().Format("2006年01月02日03时04分05秒")
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Header().Set("Content-Disposition", "attachment;fileName="+date+".zip")
 	http.ServeFile(w, r, path)
 }
 
@@ -434,7 +458,9 @@ func flatBizFiles(ctx context.Context, db *sql.DB, serverID, bizKey string, exts
 		if !ok {
 			continue
 		}
-		entries = append(entries, zipEntry{alistPath: alistPath, zipName: lastSegment(p)})
+		// v1 的 ZIP 按料号分文件夹，且用 Windows 反斜杠作分隔（Java File.separator
+		// 直接进了 ZipEntry），照抄以保证解包结构一致。
+		entries = append(entries, zipEntry{alistPath: alistPath, zipName: bizKey + `\` + lastSegment(p)})
 	}
 	return entries, rows.Err()
 }
@@ -501,7 +527,8 @@ type tempEntry struct {
 }
 
 // tempStore maps random hex keys to temporary file paths with a 30-minute TTL.
-// Keys are consumed on first pop (one-time download). A background goroutine
+// Entries stay downloadable until they expire (v1 semantics — the browser PDF
+// viewer re-requests and users refresh print tabs). A background goroutine
 // purges expired entries and their files every 5 minutes.
 type tempStore struct {
 	mu      sync.Mutex
@@ -531,19 +558,6 @@ func (s *tempStore) get(key string) (string, bool) {
 	if !ok || time.Now().After(e.expires) {
 		return "", false
 	}
-	return e.path, true
-}
-
-// pop returns the path for key and removes it from the store.
-func (s *tempStore) pop(key string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[key]
-	if !ok || time.Now().After(e.expires) {
-		delete(s.entries, key)
-		return "", false
-	}
-	delete(s.entries, key)
 	return e.path, true
 }
 
